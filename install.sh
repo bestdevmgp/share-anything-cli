@@ -1,7 +1,7 @@
 #!/bin/sh
 set -e
 
-REPO="share-anything/share-anything-cli"
+REPO="bestdevmgp/share-anything-cli"
 BINARY_NAME="sa"
 INSTALL_DIR="/usr/local/bin"
 
