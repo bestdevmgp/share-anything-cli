@@ -9,18 +9,18 @@ use std::path::PathBuf;
 
 #[derive(Parser)]
 #[command(
-    name = "sany",
+    name = "share",
     version,
     about = "Share Anything CLI - fast file sharing from the terminal",
-    override_usage = "sany <COMMAND>",
+    override_usage = "share <COMMAND>",
     after_help = "\x1b[1mExamples:\x1b[0m
-  sany upload file.txt              Upload a file
-  sany upload a.txt b.txt           Upload multiple files
-  echo 'hi' | sany upload -n hi.txt Pipe stdin
-  sany download ABC123              Download by share code
-  sany info ABC123                  Check file info
-  sany login sa_your_key_here       Save API key
-  sany list                         View upload history"
+  share upload file.txt              Upload a file
+  share upload a.txt b.txt           Upload multiple files
+  echo 'hi' | share upload -n hi.txt Pipe stdin
+  share download ABC123              Download by share code
+  share info ABC123                  Check file info
+  share login sa_your_key_here       Save API key
+  share list                         View upload history"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -125,8 +125,8 @@ async fn main() {
 
             if files.is_empty() && stdin_data.is_none() {
                 eprintln!("\x1b[31mError: No files specified. Provide file paths or pipe data via stdin.\x1b[0m");
-                eprintln!("  Usage: sany upload <file1> [file2 ...]");
-                eprintln!("  Pipe:  echo 'hello' | sany upload --name hello.txt");
+                eprintln!("  Usage: share upload <file1> [file2 ...]");
+                eprintln!("  Pipe:  echo 'hello' | share upload --name hello.txt");
                 std::process::exit(1);
             }
 

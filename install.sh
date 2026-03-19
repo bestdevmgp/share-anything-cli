@@ -2,7 +2,7 @@
 set -e
 
 REPO="bestdevmgp/share-anything-cli"
-BINARY_NAME="sany"
+BINARY_NAME="share"
 INSTALL_DIR="/usr/local/bin"
 
 # Detect OS and architecture
@@ -49,5 +49,5 @@ rm -rf "$TMPDIR"
 
 echo ""
 echo "✓ ${BINARY_NAME} installed to ${INSTALL_DIR}/${BINARY_NAME}"
-echo "  Run 'sany --help' to get started."
+echo "  Run 'share --help' to get started."
 echo ""

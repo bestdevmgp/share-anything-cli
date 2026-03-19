@@ -1,12 +1,12 @@
 [package]
-name = "sany"
+name = "share"
 version = "0.1.0"
 edition = "2021"
 description = "CLI for Share Anything file sharing"
 license = "MIT"
 
 [[bin]]
-name = "sany"
+name = "share"
 path = "src/main.rs"
 
 [dependencies]

@@ -16,19 +16,19 @@ jobs:
         include:
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
-            name: sany-linux-x86_64
+            name: share-linux-x86_64
           - target: aarch64-unknown-linux-gnu
             os: ubuntu-latest
-            name: sany-linux-aarch64
+            name: share-linux-aarch64
           - target: x86_64-apple-darwin
             os: macos-latest
-            name: sany-macos-x86_64
+            name: share-macos-x86_64
           - target: aarch64-apple-darwin
             os: macos-latest
-            name: sany-macos-aarch64
+            name: share-macos-aarch64
           - target: x86_64-pc-windows-msvc
             os: windows-latest
-            name: sany-windows-x86_64.exe
+            name: share-windows-x86_64.exe
 
     runs-on: ${{ matrix.os }}
 
@@ -55,14 +55,14 @@ jobs:
       - name: Package binary (unix)
         if: runner.os != 'Windows'
         run: |
-          cp target/${{ matrix.target }}/release/sany ${{ matrix.name }}
+          cp target/${{ matrix.target }}/release/share ${{ matrix.name }}
           sha256sum ${{ matrix.name }} > ${{ matrix.name }}.sha256 || shasum -a 256 ${{ matrix.name }} > ${{ matrix.name }}.sha256
 
       - name: Package binary (windows)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          cp target/${{ matrix.target }}/release/sany.exe ${{ matrix.name }}
+          cp target/${{ matrix.target }}/release/share.exe ${{ matrix.name }}
           (Get-FileHash ${{ matrix.name }} -Algorithm SHA256).Hash + "  " + "${{ matrix.name }}" | Out-File -Encoding ascii ${{ matrix.name }}.sha256
 
       - name: Upload Release Assets
