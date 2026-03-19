@@ -1,0 +1,11 @@
+/Users/mingyupark/Desktop/Dev/share-anything-cli/target/debug/deps/console-bb351ca451c1c6e6.d: /Users/mingyupark/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/console-0.15.11/src/lib.rs /Users/mingyupark/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/console-0.15.11/src/common_term.rs /Users/mingyupark/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/console-0.15.11/src/kb.rs /Users/mingyupark/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/console-0.15.11/src/term.rs /Users/mingyupark/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/console-0.15.11/src/unix_term.rs /Users/mingyupark/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/console-0.15.11/src/utils.rs /Users/mingyupark/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/console-0.15.11/src/ansi.rs
+
+/Users/mingyupark/Desktop/Dev/share-anything-cli/target/debug/deps/libconsole-bb351ca451c1c6e6.rmeta: /Users/mingyupark/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/console-0.15.11/src/lib.rs /Users/mingyupark/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/console-0.15.11/src/common_term.rs /Users/mingyupark/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/console-0.15.11/src/kb.rs /Users/mingyupark/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/console-0.15.11/src/term.rs /Users/mingyupark/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/console-0.15.11/src/unix_term.rs /Users/mingyupark/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/console-0.15.11/src/utils.rs /Users/mingyupark/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/console-0.15.11/src/ansi.rs
+
+/Users/mingyupark/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/console-0.15.11/src/lib.rs:
+/Users/mingyupark/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/console-0.15.11/src/common_term.rs:
+/Users/mingyupark/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/console-0.15.11/src/kb.rs:
+/Users/mingyupark/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/console-0.15.11/src/term.rs:
+/Users/mingyupark/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/console-0.15.11/src/unix_term.rs:
+/Users/mingyupark/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/console-0.15.11/src/utils.rs:
+/Users/mingyupark/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/console-0.15.11/src/ansi.rs:

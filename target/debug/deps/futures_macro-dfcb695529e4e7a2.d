@@ -1,0 +1,9 @@
+/Users/mingyupark/Desktop/Dev/share-anything-cli/target/debug/deps/futures_macro-dfcb695529e4e7a2.d: /Users/mingyupark/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/futures-macro-0.3.32/src/lib.rs /Users/mingyupark/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/futures-macro-0.3.32/src/executor.rs /Users/mingyupark/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/futures-macro-0.3.32/src/join.rs /Users/mingyupark/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/futures-macro-0.3.32/src/select.rs /Users/mingyupark/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/futures-macro-0.3.32/src/stream_select.rs
+
+/Users/mingyupark/Desktop/Dev/share-anything-cli/target/debug/deps/libfutures_macro-dfcb695529e4e7a2.dylib: /Users/mingyupark/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/futures-macro-0.3.32/src/lib.rs /Users/mingyupark/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/futures-macro-0.3.32/src/executor.rs /Users/mingyupark/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/futures-macro-0.3.32/src/join.rs /Users/mingyupark/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/futures-macro-0.3.32/src/select.rs /Users/mingyupark/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/futures-macro-0.3.32/src/stream_select.rs
+
+/Users/mingyupark/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/futures-macro-0.3.32/src/lib.rs:
+/Users/mingyupark/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/futures-macro-0.3.32/src/executor.rs:
+/Users/mingyupark/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/futures-macro-0.3.32/src/join.rs:
+/Users/mingyupark/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/futures-macro-0.3.32/src/select.rs:
+/Users/mingyupark/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/futures-macro-0.3.32/src/stream_select.rs:
