@@ -8,7 +8,20 @@ use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
 #[derive(Parser)]
-#[command(name = "sany", version, about = "Share Anything CLI - fast file sharing from the terminal")]
+#[command(
+    name = "sany",
+    version,
+    about = "Share Anything CLI - fast file sharing from the terminal",
+    override_usage = "sany <COMMAND>",
+    after_help = "\x1b[1mExamples:\x1b[0m
+  sany upload file.txt              Upload a file
+  sany upload a.txt b.txt           Upload multiple files
+  echo 'hi' | sany upload -n hi.txt Pipe stdin
+  sany download ABC123              Download by share code
+  sany info ABC123                  Check file info
+  sany login sa_your_key_here       Save API key
+  sany list                         View upload history"
+)]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
