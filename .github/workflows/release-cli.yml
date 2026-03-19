@@ -25,6 +25,9 @@ jobs:
           - target: aarch64-apple-darwin
             os: macos-latest
             name: sa-macos-aarch64
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            name: sa-windows-x86_64.exe
 
     runs-on: ${{ matrix.os }}
 
@@ -48,10 +51,18 @@ jobs:
         if: matrix.target != 'aarch64-unknown-linux-gnu'
         run: cargo build --release --target ${{ matrix.target }}
 
-      - name: Package binary
+      - name: Package binary (unix)
+        if: runner.os != 'Windows'
         run: |
           cp target/${{ matrix.target }}/release/sa ${{ matrix.name }}
           sha256sum ${{ matrix.name }} > ${{ matrix.name }}.sha256 || shasum -a 256 ${{ matrix.name }} > ${{ matrix.name }}.sha256
+
+      - name: Package binary (windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          cp target/${{ matrix.target }}/release/sa.exe ${{ matrix.name }}
+          (Get-FileHash ${{ matrix.name }} -Algorithm SHA256).Hash + "  " + "${{ matrix.name }}" | Out-File -Encoding ascii ${{ matrix.name }}.sha256
 
       - name: Upload Release Assets
         uses: softprops/action-gh-release@v2
