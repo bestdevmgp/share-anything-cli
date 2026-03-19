@@ -8,7 +8,7 @@ use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
 #[derive(Parser)]
-#[command(name = "sa", version, about = "Share Anything CLI - fast file sharing from the terminal")]
+#[command(name = "sany", version, about = "Share Anything CLI - fast file sharing from the terminal")]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
@@ -112,8 +112,8 @@ async fn main() {
 
             if files.is_empty() && stdin_data.is_none() {
                 eprintln!("\x1b[31mError: No files specified. Provide file paths or pipe data via stdin.\x1b[0m");
-                eprintln!("  Usage: sa upload <file1> [file2 ...]");
-                eprintln!("  Pipe:  echo 'hello' | sa upload --name hello.txt");
+                eprintln!("  Usage: sany upload <file1> [file2 ...]");
+                eprintln!("  Pipe:  echo 'hello' | sany upload --name hello.txt");
                 std::process::exit(1);
             }
 

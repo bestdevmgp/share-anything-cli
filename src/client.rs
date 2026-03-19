@@ -11,7 +11,7 @@ pub struct ApiClient {
 impl ApiClient {
     pub fn new(config: &CliConfig) -> Result<Self> {
         let mut headers = HeaderMap::new();
-        headers.insert("User-Agent", HeaderValue::from_static("sa-cli/0.1.0"));
+        headers.insert("User-Agent", HeaderValue::from_static("sany-cli/0.1.0"));
 
         if let Some(ref key) = config.api_key {
             headers.insert(

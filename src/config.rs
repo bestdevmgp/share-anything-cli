@@ -11,7 +11,7 @@ impl CliConfig {
     pub fn config_dir() -> PathBuf {
         dirs::home_dir()
             .unwrap_or_else(|| PathBuf::from("."))
-            .join(".sa")
+            .join(".sany")
     }
 
     pub fn config_path() -> PathBuf {

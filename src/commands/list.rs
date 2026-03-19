@@ -4,7 +4,7 @@ use crate::error::{CliError, Result};
 pub async fn run(client: &ApiClient) -> Result<()> {
     if !client.is_authenticated() {
         return Err(CliError::Other(
-            "API key required. Use `sa login <api-key>` first.".to_string(),
+            "API key required. Use `sany login <api-key>` first.".to_string(),
         ));
     }
 
