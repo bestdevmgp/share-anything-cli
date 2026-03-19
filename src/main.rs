@@ -38,7 +38,7 @@ enum Commands {
         #[arg(short, long)]
         password: Option<String>,
 
-        /// Expiration: 30m, 1h, 3h, 6h, 12h, 24h (requires API key)
+        /// Expiration: 5m, 30m, 1h, 3h, 6h, 12h, 24h (requires API key)
         #[arg(short, long)]
         expires: Option<String>,
 
