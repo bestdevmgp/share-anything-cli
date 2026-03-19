@@ -14,7 +14,6 @@ struct FileInfoResponse {
 
 #[derive(Debug, Deserialize)]
 struct FileDetail {
-    id: String,
     file_name: String,
     file_size: i64,
 }
@@ -100,13 +99,7 @@ pub async fn run(
             }
         })
         .unwrap_or_else(|| {
-            if let Some(fid) = &file_id {
-                info.files
-                    .iter()
-                    .find(|f| &f.id == fid)
-                    .map(|f| f.file_name.clone())
-                    .unwrap_or_else(|| format!("download_{}", code))
-            } else if !info.files.is_empty() {
+            if !info.files.is_empty() {
                 info.files[0].file_name.clone()
             } else {
                 format!("download_{}", code)
@@ -114,13 +107,7 @@ pub async fn run(
         });
 
     let content_length = resp.content_length().unwrap_or(0);
-    let target_file = if let Some(fid) = &file_id {
-        info.files
-            .iter()
-            .find(|f| &f.id == fid)
-            .map(|f| f.file_size as u64)
-            .unwrap_or(content_length)
-    } else if !info.files.is_empty() {
+    let target_file = if !info.files.is_empty() {
         info.files[0].file_size as u64
     } else {
         content_length

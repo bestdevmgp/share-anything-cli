@@ -8,16 +8,9 @@ use std::path::PathBuf;
 #[derive(Debug, Deserialize)]
 struct UploadResponse {
     share_code: String,
-    files: Vec<FileInfo>,
-    download_url: String,
+    files: Vec<String>,
     curl_command: String,
     expires_at: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct FileInfo {
-    file_name: String,
-    file_size: i64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -340,31 +333,14 @@ fn print_upload_result(result: &UploadResponse) {
     println!();
     println!("\x1b[32m✓ Upload complete!\x1b[0m");
     println!("  Share code : {}", result.share_code);
-    println!("  Download   : {}", result.download_url);
     println!("  curl       : {}", result.curl_command);
     println!("  Expires    : {}", result.expires_at);
 
     if result.files.len() > 1 {
         println!("  Files:");
         for f in &result.files {
-            println!("    - {} ({})", f.file_name, format_size(f.file_size));
+            println!("    - {}", f);
         }
     }
     println!();
-}
-
-fn format_size(bytes: i64) -> String {
-    const KB: i64 = 1024;
-    const MB: i64 = 1024 * KB;
-    const GB: i64 = 1024 * MB;
-
-    if bytes >= GB {
-        format!("{:.1} GB", bytes as f64 / GB as f64)
-    } else if bytes >= MB {
-        format!("{:.1} MB", bytes as f64 / MB as f64)
-    } else if bytes >= KB {
-        format!("{:.1} KB", bytes as f64 / KB as f64)
-    } else {
-        format!("{} B", bytes)
-    }
 }

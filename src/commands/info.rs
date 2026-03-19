@@ -13,10 +13,8 @@ struct FileInfoResponse {
 
 #[derive(Debug, Deserialize)]
 struct FileDetail {
-    id: String,
     file_name: String,
     file_size: i64,
-    file_type: String,
 }
 
 pub async fn run(client: &ApiClient, code: String) -> Result<()> {
@@ -47,8 +45,7 @@ pub async fn run(client: &ApiClient, code: String) -> Result<()> {
     println!("Expires at  : {}", info.expires_at);
     println!("Files ({}):", info.files.len());
     for f in &info.files {
-        println!("  - {} ({}, {})", f.file_name, format_size(f.file_size), f.file_type);
-        println!("    ID: {}", f.id);
+        println!("  - {} ({})", f.file_name, format_size(f.file_size));
     }
     println!();
 
