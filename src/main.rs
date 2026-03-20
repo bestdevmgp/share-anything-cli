@@ -11,15 +11,16 @@ use std::path::PathBuf;
 #[command(
     name = "share",
     version,
-    about = "Share Anything CLI - fast file sharing from the terminal",
+    about = "Share Anything CLI - Fast file sharing from the terminal",
     override_usage = "share <COMMAND>",
+    before_help = "\x1b[1mShare Anything CLI\x1b[0m - Fast file sharing from the terminal\n  \x1b[2mhttps://share.mingyu.dev\x1b[0m",
     after_help = "\x1b[1mExamples:\x1b[0m
   share upload file.txt              Upload a file
   share upload a.txt b.txt           Upload multiple files
   echo 'hi' | share upload -n hi.txt Pipe stdin
   share download ABC123              Download by share code
   share info ABC123                  Check file info
-  share login sa_your_key_here       Save API key
+  share login sa_your_token_here      Save personal token
   share list                         View upload history"
 )]
 struct Cli {
@@ -34,15 +35,15 @@ enum Commands {
         /// Files to upload
         files: Vec<PathBuf>,
 
-        /// Password for download (requires API key)
+        /// Password for download (requires personal token)
         #[arg(short, long)]
         password: Option<String>,
 
-        /// Expiration: 5m, 30m, 1h, 3h, 6h, 12h, 24h (requires API key)
+        /// Expiration: 5m, 30m, 1h, 3h, 6h, 12h, 24h (requires personal token)
         #[arg(short, long)]
         expires: Option<String>,
 
-        /// One-time download (requires API key)
+        /// One-time download (requires personal token)
         #[arg(long)]
         one_time: bool,
 
@@ -74,16 +75,16 @@ enum Commands {
         code: String,
     },
 
-    /// List your upload history (requires API key)
+    /// List your upload history (requires personal token)
     List,
 
-    /// Save API key for authenticated access
+    /// Save personal token for authenticated access
     Login {
-        /// API key (starts with sa_)
-        api_key: String,
+        /// Personal token (starts with sa_)
+        token: String,
     },
 
-    /// Remove saved API key
+    /// Remove saved personal token
     Logout,
 }
 
@@ -170,7 +171,7 @@ async fn main() {
             commands::list::run(&api_client).await
         }
 
-        Commands::Login { api_key } => commands::login::run(api_key),
+        Commands::Login { token } => commands::login::run(token).await,
 
         Commands::Logout => commands::logout::run(),
     };

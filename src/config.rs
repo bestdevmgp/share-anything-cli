@@ -3,7 +3,7 @@ use std::path::PathBuf;
 
 #[derive(Debug, Serialize, Deserialize, Default)]
 pub struct CliConfig {
-    pub api_key: Option<String>,
+    pub token: Option<String>,
     pub server_url: Option<String>,
 }
 
