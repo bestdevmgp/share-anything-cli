@@ -5,6 +5,7 @@ use futures_util::StreamExt;
 use serde::Deserialize;
 use std::path::PathBuf;
 
+#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 struct FileInfoResponse {
     share_code: String,

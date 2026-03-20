@@ -11,12 +11,12 @@ pub struct ApiClient {
 impl ApiClient {
     pub fn new(config: &CliConfig) -> Result<Self> {
         let mut headers = HeaderMap::new();
-        headers.insert("User-Agent", HeaderValue::from_static("share-cli/0.1.0"));
+        headers.insert("User-Agent", HeaderValue::from_str(&format!("share-cli/{}", env!("CARGO_PKG_VERSION"))).unwrap());
 
-        if let Some(ref key) = config.token {
+        if let Some(ref token) = config.token {
             headers.insert(
                 "X-Personal-Token",
-                HeaderValue::from_str(key).map_err(|_| CliError::Config("Invalid personal token".into()))?,
+                HeaderValue::from_str(token).map_err(|_| CliError::Config("Invalid personal token".into()))?,
             );
         }
 

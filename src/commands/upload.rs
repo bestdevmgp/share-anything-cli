@@ -13,6 +13,7 @@ struct UploadResponse {
     expires_at: String,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 struct MultipartInitResponse {
     upload_session_id: String,
@@ -21,6 +22,7 @@ struct MultipartInitResponse {
     chunk_size: i64,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 struct MultipartFileInit {
     file_name: String,
@@ -34,6 +36,7 @@ struct PresignPartsResponse {
     urls: Vec<PartUrl>,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 struct PartUrl {
     part_number: i32,
