@@ -140,7 +140,12 @@ pub async fn run(
 
     println!();
     println!("\x1b[32m✓ Download complete!\x1b[0m");
-    println!("  Saved to: {}", output_path.display());
+    let display_path = if output_path.is_relative() && !output_path.starts_with(".") {
+        format!("./{}", output_path.display())
+    } else {
+        output_path.display().to_string()
+    };
+    println!("  Saved to: {}", display_path);
     println!();
 
     Ok(())

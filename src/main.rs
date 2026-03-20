@@ -61,7 +61,6 @@ enum Commands {
         password: Option<String>,
 
         /// Output path
-        #[arg(short, long)]
         output: Option<PathBuf>,
 
         /// Specific file ID to download
