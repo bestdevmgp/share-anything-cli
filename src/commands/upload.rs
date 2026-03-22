@@ -55,7 +55,6 @@ pub async fn run(
     expiration: Option<String>,
     one_time: bool,
 ) -> Result<()> {
-    // Collect file data
     let mut file_entries: Vec<(String, Vec<u8>, String)> = Vec::new();
 
     if let Some(data) = stdin_data {
@@ -86,10 +85,8 @@ pub async fn run(
     let total_size: u64 = file_entries.iter().map(|(_, d, _)| d.len() as u64).sum();
 
     if total_size >= MULTIPART_THRESHOLD && file_entries.len() == 1 {
-        // Use multipart presigned upload for large files
         upload_multipart(client, &file_entries[0], password, expiration, one_time).await
     } else {
-        // Direct upload
         upload_direct(client, file_entries, total_size, password, expiration, one_time).await
     }
 }
@@ -218,7 +215,6 @@ async fn upload_multipart(
     let mut completed_parts: Vec<serde_json::Value> = Vec::new();
 
     if file_init.total_parts <= 1 {
-        // Single part — use presigned PUT
         let presign_resp = client
             .client
             .post(client.url("/cli/upload/multipart/presign-parts"))
@@ -251,7 +247,6 @@ async fn upload_multipart(
             }));
         }
     } else {
-        // Multi-part upload
         let chunk_size = CHUNK_SIZE as usize;
         let total_parts = file_init.total_parts;
 
@@ -260,7 +255,6 @@ async fn upload_multipart(
             let end = std::cmp::min(start + chunk_size, data.len());
             let chunk = &data[start..end];
 
-            // Get presigned URL for this part
             let presign_resp = client
                 .client
                 .post(client.url("/cli/upload/multipart/presign-parts"))
@@ -296,7 +290,6 @@ async fn upload_multipart(
 
     pb.finish_and_clear();
 
-    // Complete multipart upload
     let complete_resp = client
         .client
         .post(client.url("/cli/upload/multipart/complete"))

@@ -26,7 +26,6 @@ pub async fn run(
     output: Option<PathBuf>,
     file_id: Option<String>,
 ) -> Result<()> {
-    // Get file info first
     let info_resp = client
         .client
         .get(client.url(&format!("/cli/download/{}/info", code)))
@@ -53,7 +52,6 @@ pub async fn run(
         ));
     }
 
-    // Build download URL
     let mut url = client.url(&format!("/cli/download/{}", code));
     let mut params = Vec::new();
     if let Some(ref pw) = password {
@@ -80,7 +78,6 @@ pub async fn run(
         });
     }
 
-    // Extract filename from Content-Disposition
     let file_name = resp
         .headers()
         .get("content-disposition")

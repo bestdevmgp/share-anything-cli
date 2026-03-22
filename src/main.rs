@@ -80,8 +80,8 @@ enum Commands {
 
     /// Save personal token for authenticated access
     Login {
-        /// Personal token (starts with sa_)
-        token: String,
+        /// Personal token (starts with sa_). If omitted, opens browser login
+        token: Option<String>,
     },
 
     /// Remove saved personal token
@@ -109,7 +109,6 @@ async fn main() {
                 }
             };
 
-            // Check for stdin pipe
             let stdin_data = if files.is_empty() && atty::isnt(atty::Stream::Stdin) {
                 use std::io::Read;
                 let mut buf = Vec::new();
@@ -171,7 +170,7 @@ async fn main() {
             commands::list::run(&api_client).await
         }
 
-        Commands::Login { token } => commands::login::run(token).await,
+        Commands::Login { token } => commands::login::run(token, &cfg).await,
 
         Commands::Logout => commands::logout::run(),
     };
