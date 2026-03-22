@@ -203,10 +203,10 @@ fn print_qr_code(url: &str) {
             let bottom = get_module(&data, width, x as isize - quiet as isize, y as isize + 1 - quiet as isize);
 
             match (top, bottom) {
-                (true, true) => print!("█"),
-                (true, false) => print!("▀"),
-                (false, true) => print!("▄"),
-                (false, false) => print!(" "),
+                (true, true) => print!("██"),
+                (true, false) => print!("▀▀"),
+                (false, true) => print!("▄▄"),
+                (false, false) => print!("  "),
             }
         }
         println!();
