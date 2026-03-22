@@ -1,0 +1,38 @@
+{
+  "name": "share-anything",
+  "version": "0.3.3",
+  "description": "CLI for Share Anything - Fast file sharing from the terminal",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/bestdevmgp/share-anything-cli"
+  },
+  "homepage": "https://github.com/bestdevmgp/share-anything-cli",
+  "bin": {
+    "share": "run.js"
+  },
+  "scripts": {
+    "postinstall": "node install.js"
+  },
+  "files": [
+    "install.js",
+    "run.js"
+  ],
+  "keywords": [
+    "file-sharing",
+    "cli",
+    "share",
+    "upload",
+    "download",
+    "curl"
+  ],
+  "os": [
+    "darwin",
+    "linux",
+    "win32"
+  ],
+  "cpu": [
+    "x64",
+    "arm64"
+  ]
+}
