@@ -2,7 +2,7 @@ use crate::client::ApiClient;
 use crate::config::CliConfig;
 use crate::error::{CliError, Result};
 use indicatif::{ProgressBar, ProgressStyle};
-use qrcode::QrCode;
+use qrcode::{QrCode, EcLevel};
 use serde::Deserialize;
 use std::time::{Duration, Instant};
 
@@ -56,7 +56,7 @@ async fn run_token_login(token: String) -> Result<()> {
 
         println!("\x1b[32m✓ Welcome, {}!\x1b[0m", name);
         if let Some(last) = last_used {
-            println!("  Last login: {}", last);
+            println!("  Last sign-in: {}", last);
         }
     } else {
         println!("\x1b[33m⚠ Token saved, but verification failed. Please check if the token is valid.\x1b[0m");
@@ -81,7 +81,7 @@ async fn run_device_login(config: &CliConfig) -> Result<()> {
         let body: serde_json::Value = resp.json().await.unwrap_or_default();
         let message = body["error"]
             .as_str()
-            .unwrap_or("Failed to create login session")
+            .unwrap_or("Failed to create sign-in session")
             .to_string();
         return Err(CliError::Api { status, message });
     }
@@ -91,16 +91,17 @@ async fn run_device_login(config: &CliConfig) -> Result<()> {
     })?;
 
     match open::that(&session.login_url) {
-        Ok(_) => println!("\x1b[32m브라우저가 열렸습니다. 로그인을 완료해주세요.\x1b[0m"),
-        Err(_) => println!("\x1b[33m브라우저를 열 수 없습니다.\x1b[0m"),
+        Ok(_) => println!("\x1b[32mBrowser opened. Please complete the sign-in.\x1b[0m"),
+        Err(_) => println!("\x1b[33mCould not open the browser.\x1b[0m"),
     }
 
     println!();
-    println!("아래 링크에서 로그인하세요:");
-    println!("  \x1b[36m{}\x1b[0m", session.login_url);
-    println!();
-    println!("또는 QR 코드를 스캔하세요:");
     print_qr_code(&session.login_url);
+    println!();
+    println!(
+        "  If you can't use a browser, scan the QR code or visit the link below to sign in:"
+    );
+    println!("  \x1b[36m{}\x1b[0m", session.login_url);
     println!();
 
     let spinner = ProgressBar::new_spinner();
@@ -109,7 +110,7 @@ async fn run_device_login(config: &CliConfig) -> Result<()> {
             .template("{spinner:.green} {msg}")
             .unwrap(),
     );
-    spinner.set_message("대기 중...");
+    spinner.set_message("Waiting for sign-in...");
 
     let start = Instant::now();
     let timeout = Duration::from_secs(session.expires_in_seconds);
@@ -118,7 +119,7 @@ async fn run_device_login(config: &CliConfig) -> Result<()> {
         if start.elapsed() > timeout {
             spinner.finish_and_clear();
             return Err(CliError::Other(
-                "세션이 만료되었습니다. 다시 시도해주세요".to_string(),
+                "Session expired. Please try again".to_string(),
             ));
         }
 
@@ -164,7 +165,7 @@ async fn run_device_login(config: &CliConfig) -> Result<()> {
 
                 let user_name = status.user_name.as_deref().unwrap_or("User");
                 println!(
-                    "\x1b[32m✓ 로그인 완료! {}님 환영합니다\x1b[0m",
+                    "\x1b[32m✓ Signed in! Welcome, {}\x1b[0m",
                     user_name
                 );
                 return Ok(());
@@ -172,7 +173,7 @@ async fn run_device_login(config: &CliConfig) -> Result<()> {
             "expired" => {
                 spinner.finish_and_clear();
                 return Err(CliError::Other(
-                    "세션이 만료되었습니다. 다시 시도해주세요".to_string(),
+                    "Session expired. Please try again".to_string(),
                 ));
             }
             _ => continue,
@@ -181,10 +182,10 @@ async fn run_device_login(config: &CliConfig) -> Result<()> {
 }
 
 fn print_qr_code(url: &str) {
-    let code = match QrCode::new(url.as_bytes()) {
+    let code = match QrCode::with_error_correction_level(url.as_bytes(), EcLevel::L) {
         Ok(c) => c,
         Err(_) => {
-            println!("  \x1b[33m(QR 코드를 생성할 수 없습니다)\x1b[0m");
+            println!("  \x1b[33m(Failed to generate QR code)\x1b[0m");
             return;
         }
     };

@@ -80,7 +80,7 @@ enum Commands {
 
     /// Save personal token for authenticated access
     Login {
-        /// Personal token (starts with sa_). If omitted, opens browser login
+        /// Personal token (starts with sa_). If omitted, opens browser sign-in
         token: Option<String>,
     },
 
