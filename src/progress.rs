@@ -4,13 +4,21 @@ pub fn create_upload_progress(total_size: u64, file_name: &str) -> ProgressBar {
     let pb = ProgressBar::new(total_size);
     pb.set_style(
         ProgressStyle::with_template(
-            "{msg}\n{wide_bar:.cyan/blue} {percent}% | {bytes}/{total_bytes} | {bytes_per_sec} | {eta}"
+            "{msg}\n{wide_bar:.blue/black} {percent}% | {bytes}/{total_bytes} | {bytes_per_sec} | {eta}"
         )
         .unwrap()
         .progress_chars("██░"),
     );
     pb.set_message(format!("Uploading: {}", file_name));
     pb
+}
+
+pub fn update_progress(pb: &ProgressBar, n: u64) {
+    pb.inc(n);
+}
+
+pub fn finish_progress(pb: &ProgressBar) {
+    pb.finish_and_clear();
 }
 
 pub fn create_download_progress(total_size: u64, file_name: &str) -> ProgressBar {

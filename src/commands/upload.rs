@@ -1,6 +1,7 @@
 use crate::client::ApiClient;
 use crate::error::{CliError, Result};
-use crate::progress::{create_upload_progress, create_spinner};
+use crate::progress::{create_upload_progress, create_spinner, update_progress, finish_progress};
+use indicatif::ProgressBar;
 use reqwest::multipart;
 use serde::Deserialize;
 use std::path::PathBuf;
@@ -45,6 +46,22 @@ struct PartUrl {
 
 const MULTIPART_THRESHOLD: u64 = 100 * 1024 * 1024; // 100MB
 const CHUNK_SIZE: i64 = 50 * 1024 * 1024; // 50MB
+const STREAM_CHUNK: usize = 16384; // 16KB
+
+fn progress_stream(
+    data: Vec<u8>,
+    pb: ProgressBar,
+) -> impl futures_util::Stream<Item = std::result::Result<Vec<u8>, std::io::Error>> + Send {
+    futures_util::stream::unfold((data, 0usize, pb), |(data, offset, pb)| async move {
+        if offset >= data.len() {
+            return None;
+        }
+        let end = std::cmp::min(offset + STREAM_CHUNK, data.len());
+        let chunk = data[offset..end].to_vec();
+        update_progress(&pb, chunk.len() as u64);
+        Some((Ok(chunk), (data, end, pb)))
+    })
+}
 
 pub async fn run(
     client: &ApiClient,
@@ -110,13 +127,14 @@ async fn upload_direct(
     let mut form = multipart::Form::new();
 
     for (name, data, content_type) in files {
-        let len = data.len();
-        let part = multipart::Part::bytes(data)
+        let len = data.len() as u64;
+        let stream = progress_stream(data, pb.clone());
+        let body = reqwest::Body::wrap_stream(stream);
+        let part = multipart::Part::stream_with_length(body, len)
             .file_name(name)
             .mime_str(&content_type)
             .unwrap();
         form = form.part("file", part);
-        pb.inc(len as u64);
     }
 
     if let Some(pw) = password {
@@ -129,8 +147,6 @@ async fn upload_direct(
         form = form.text("is_one_time", "true");
     }
 
-    pb.set_position(0);
-
     let resp = client
         .client
         .post(client.url("/cli/upload"))
@@ -138,7 +154,7 @@ async fn upload_direct(
         .send()
         .await?;
 
-    pb.finish_and_clear();
+    finish_progress(&pb);
 
     if !resp.status().is_success() {
         let status = resp.status().as_u16();
@@ -230,15 +246,18 @@ async fn upload_multipart(
         let presign: PresignPartsResponse = presign_resp.json().await?;
         let url = &presign.urls[0].presigned_url;
 
+        let len = data.len();
+        let stream = progress_stream(data.clone(), pb.clone());
+        let body = reqwest::Body::wrap_stream(stream);
+
         let resp = client
             .client
             .put(url)
-            .header("Content-Type", content_type.as_str())
-            .body(data.clone())
+            .header("content-type", content_type.as_str())
+            .header("content-length", len.to_string())
+            .body(body)
             .send()
             .await?;
-
-        pb.inc(file_size as u64);
 
         if let Some(etag) = resp.headers().get("etag") {
             completed_parts.push(serde_json::json!({
@@ -253,7 +272,8 @@ async fn upload_multipart(
         for part_num in 1..=total_parts {
             let start = (part_num as usize - 1) * chunk_size;
             let end = std::cmp::min(start + chunk_size, data.len());
-            let chunk = &data[start..end];
+            let chunk_data = data[start..end].to_vec();
+            let chunk_len = chunk_data.len();
 
             let presign_resp = client
                 .client
@@ -270,14 +290,16 @@ async fn upload_multipart(
             let presign: PresignPartsResponse = presign_resp.json().await?;
             let url = &presign.urls[0].presigned_url;
 
+            let stream = progress_stream(chunk_data, pb.clone());
+            let body = reqwest::Body::wrap_stream(stream);
+
             let resp = client
                 .client
                 .put(url)
-                .body(chunk.to_vec())
+                .header("content-length", chunk_len.to_string())
+                .body(body)
                 .send()
                 .await?;
-
-            pb.inc(chunk.len() as u64);
 
             if let Some(etag) = resp.headers().get("etag") {
                 completed_parts.push(serde_json::json!({
@@ -288,7 +310,7 @@ async fn upload_multipart(
         }
     }
 
-    pb.finish_and_clear();
+    finish_progress(&pb);
 
     let complete_resp = client
         .client
