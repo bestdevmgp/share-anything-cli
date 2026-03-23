@@ -199,50 +199,28 @@ fn print_qr_code(url: &str) {
         }
     };
 
-    let width = code.width();
+    let w = code.width();
     let data = code.to_colors();
+    let is_dark = |x: usize, y: usize| -> bool {
+        x >= 1 && y >= 1 && x <= w && y <= w
+            && data[(y - 1) * w + (x - 1)] == qrcode::Color::Dark
+    };
 
-    let quiet = 2;
-    let total = width + quiet * 2;
+    let total = w + 2;
+    let mut buf = String::with_capacity(total * (total / 2 + 1) * 4);
 
     for y in (0..total).step_by(2) {
-        print!("  ");
-        for x in (0..total).step_by(2) {
-            let tl = get_module(&data, width, x as isize - quiet as isize, y as isize - quiet as isize);
-            let tr = get_module(&data, width, (x + 1) as isize - quiet as isize, y as isize - quiet as isize);
-            let bl = get_module(&data, width, x as isize - quiet as isize, (y + 1) as isize - quiet as isize);
-            let br = get_module(&data, width, (x + 1) as isize - quiet as isize, (y + 1) as isize - quiet as isize);
-
-            let ch = match (tl, tr, bl, br) {
-                (false, false, false, false) => ' ',
-                (true,  false, false, false) => '▘',
-                (false, true,  false, false) => '▝',
-                (true,  true,  false, false) => '▀',
-                (false, false, true,  false) => '▖',
-                (true,  false, true,  false) => '▌',
-                (false, true,  true,  false) => '▞',
-                (true,  true,  true,  false) => '▛',
-                (false, false, false, true)  => '▗',
-                (true,  false, false, true)  => '▚',
-                (false, true,  false, true)  => '▐',
-                (true,  true,  false, true)  => '▜',
-                (false, false, true,  true)  => '▄',
-                (true,  false, true,  true)  => '▙',
-                (false, true,  true,  true)  => '▟',
-                (true,  true,  true,  true)  => '█',
-            };
-            print!("{}", ch);
+        buf.push_str("  ");
+        for x in 0..total {
+            buf.push(match (is_dark(x, y), is_dark(x, y + 1)) {
+                (true, true) => '█',
+                (true, false) => '▀',
+                (false, true) => '▄',
+                (false, false) => ' ',
+            });
         }
-        println!();
+        buf.push('\n');
     }
-}
 
-/// Returns true if the module at (x, y) is dark.
-/// Coordinates outside the QR code area are treated as light (quiet zone).
-fn get_module(data: &[qrcode::Color], width: usize, x: isize, y: isize) -> bool {
-    if x < 0 || y < 0 || x >= width as isize || y >= width as isize {
-        false
-    } else {
-        data[y as usize * width + x as usize] == qrcode::Color::Dark
-    }
+    print!("{}", buf);
 }
