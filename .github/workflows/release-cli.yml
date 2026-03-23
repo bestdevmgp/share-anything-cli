@@ -83,12 +83,6 @@ jobs:
           node-version: 20
           registry-url: https://registry.npmjs.org
 
-      - name: Update npm package version
-        working-directory: npm
-        run: |
-          VERSION="${GITHUB_REF#refs/tags/v}"
-          npm version "$VERSION" --no-git-tag-version
-
       - name: Publish to npm
         working-directory: npm
         run: npm publish --access public
