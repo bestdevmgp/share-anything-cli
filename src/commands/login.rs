@@ -21,6 +21,15 @@ struct StatusResponse {
 }
 
 pub async fn run(token: Option<String>, config: &CliConfig) -> Result<()> {
+    if token.is_none() {
+        if let Some(ref existing) = config.token {
+            if !existing.is_empty() {
+                println!("\x1b[33mYou are already signed in. To sign in with a different account, run \x1b[0m\x1b[1mshare logout\x1b[0m\x1b[33m first.\x1b[0m");
+                return Ok(());
+            }
+        }
+    }
+
     match token {
         Some(token) => run_token_login(token).await,
         None => run_device_login(config).await,
@@ -193,21 +202,26 @@ fn print_qr_code(url: &str) {
     let width = code.width();
     let data = code.to_colors();
 
-    let quiet = 1;
-    let total_width = width + quiet * 2;
+    let quiet = 2;
+    let total = width + quiet * 2;
 
-    for y in (0..(width + quiet * 2)).step_by(2) {
+    let quadrants: [char; 16] = [
+        ' ', '▗', '▖', '▄',
+        '▝', '▐', '▞', '▟',
+        '▘', '▚', '▌', '▙',
+        '▀', '▜', '▛', '█',
+    ];
+
+    for y in (0..total).step_by(2) {
         print!("  ");
-        for x in 0..total_width {
-            let top = get_module(&data, width, x as isize - quiet as isize, y as isize - quiet as isize);
-            let bottom = get_module(&data, width, x as isize - quiet as isize, y as isize + 1 - quiet as isize);
+        for x in (0..total).step_by(2) {
+            let tl = get_module(&data, width, x as isize - quiet as isize, y as isize - quiet as isize);
+            let tr = get_module(&data, width, x as isize + 1 - quiet as isize, y as isize - quiet as isize);
+            let bl = get_module(&data, width, x as isize - quiet as isize, y as isize + 1 - quiet as isize);
+            let br = get_module(&data, width, x as isize + 1 - quiet as isize, y as isize + 1 - quiet as isize);
 
-            match (top, bottom) {
-                (true, true) => print!("██"),
-                (true, false) => print!("▀▀"),
-                (false, true) => print!("▄▄"),
-                (false, false) => print!("  "),
-            }
+            let idx = (tl as usize) << 3 | (tr as usize) << 2 | (bl as usize) << 1 | (br as usize);
+            print!("{}", quadrants[idx]);
         }
         println!();
     }
