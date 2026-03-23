@@ -1,6 +1,6 @@
 {
   "name": "share-anything-cli",
-  "version": "0.3.6",
+  "version": "0.3.8",
   "description": "CLI for Share Anything - Fast file sharing from the terminal",
   "license": "MIT",
   "repository": {
