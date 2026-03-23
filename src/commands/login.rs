@@ -205,31 +205,19 @@ fn print_qr_code(url: &str) {
     let quiet = 2;
     let total = width + quiet * 2;
 
-    // Braille: each char encodes a 2-wide × 4-tall grid
-    // Dot layout:        Bit mapping:
-    //   (0,0) (1,0)       bit0  bit3
-    //   (0,1) (1,1)       bit1  bit4
-    //   (0,2) (1,2)       bit2  bit5
-    //   (0,3) (1,3)       bit6  bit7
-    // Terminal chars are ~1:2 (W:H), so 2×4 modules per char → square modules
-
-    let bit_map: [(usize, usize, u32); 8] = [
-        (0, 0, 1 << 0), (0, 1, 1 << 1), (0, 2, 1 << 2), (0, 3, 1 << 6),
-        (1, 0, 1 << 3), (1, 1, 1 << 4), (1, 2, 1 << 5), (1, 3, 1 << 7),
-    ];
-
-    for y in (0..total).step_by(4) {
+    for y in (0..total).step_by(2) {
         print!("  ");
-        for x in (0..total).step_by(2) {
-            let mut braille: u32 = 0x2800;
+        for x in 0..total {
+            let top = get_module(&data, width, x as isize - quiet as isize, y as isize - quiet as isize);
+            let bottom = get_module(&data, width, x as isize - quiet as isize, (y + 1) as isize - quiet as isize);
 
-            for &(dx, dy, bit) in &bit_map {
-                if get_module(&data, width, (x + dx) as isize - quiet as isize, (y + dy) as isize - quiet as isize) {
-                    braille |= bit;
-                }
-            }
-
-            print!("{}", char::from_u32(braille).unwrap_or(' '));
+            let ch = match (top, bottom) {
+                (true, true) => '█',
+                (true, false) => '▀',
+                (false, true) => '▄',
+                (false, false) => ' ',
+            };
+            print!("{}", ch);
         }
         println!();
     }
