@@ -207,15 +207,29 @@ fn print_qr_code(url: &str) {
 
     for y in (0..total).step_by(2) {
         print!("  ");
-        for x in 0..total {
-            let top = get_module(&data, width, x as isize - quiet as isize, y as isize - quiet as isize);
-            let bottom = get_module(&data, width, x as isize - quiet as isize, (y + 1) as isize - quiet as isize);
+        for x in (0..total).step_by(2) {
+            let tl = get_module(&data, width, x as isize - quiet as isize, y as isize - quiet as isize);
+            let tr = get_module(&data, width, (x + 1) as isize - quiet as isize, y as isize - quiet as isize);
+            let bl = get_module(&data, width, x as isize - quiet as isize, (y + 1) as isize - quiet as isize);
+            let br = get_module(&data, width, (x + 1) as isize - quiet as isize, (y + 1) as isize - quiet as isize);
 
-            let ch = match (top, bottom) {
-                (true, true) => '█',
-                (true, false) => '▀',
-                (false, true) => '▄',
-                (false, false) => ' ',
+            let ch = match (tl, tr, bl, br) {
+                (false, false, false, false) => ' ',
+                (true,  false, false, false) => '▘',
+                (false, true,  false, false) => '▝',
+                (true,  true,  false, false) => '▀',
+                (false, false, true,  false) => '▖',
+                (true,  false, true,  false) => '▌',
+                (false, true,  true,  false) => '▞',
+                (true,  true,  true,  false) => '▛',
+                (false, false, false, true)  => '▗',
+                (true,  false, false, true)  => '▚',
+                (false, true,  false, true)  => '▐',
+                (true,  true,  false, true)  => '▜',
+                (false, false, true,  true)  => '▄',
+                (true,  false, true,  true)  => '▙',
+                (false, true,  true,  true)  => '▟',
+                (true,  true,  true,  true)  => '█',
             };
             print!("{}", ch);
         }
