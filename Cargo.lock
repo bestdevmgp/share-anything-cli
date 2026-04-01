@@ -1463,7 +1463,7 @@ dependencies = [
 
 [[package]]
 name = "share"
-version = "0.4.4"
+version = "0.4.5"
 dependencies = [
  "anyhow",
  "atty",
@@ -1472,6 +1472,7 @@ dependencies = [
  "console 0.16.3",
  "dirs",
  "futures-util",
+ "iana-time-zone",
  "indicatif",
  "mime_guess",
  "open",
