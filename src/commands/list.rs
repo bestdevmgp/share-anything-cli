@@ -43,7 +43,8 @@ pub async fn run(client: &ApiClient) -> Result<()> {
             let code = upload["share_code"].as_str().unwrap_or("-");
             let name = upload["file_name"].as_str().unwrap_or("-");
             let size = upload["file_size"].as_i64().unwrap_or(0);
-            let expires = upload["expires_at"].as_str().unwrap_or("-");
+            let expires_raw = upload["expires_at"].as_str().unwrap_or("-");
+            let expires = crate::time::utc_to_local(expires_raw);
 
             let display_name = if name.len() > 28 {
                 format!("{}...", &name[..25])

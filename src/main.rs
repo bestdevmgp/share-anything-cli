@@ -3,6 +3,7 @@ mod commands;
 mod config;
 mod error;
 mod progress;
+pub mod time;
 
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;

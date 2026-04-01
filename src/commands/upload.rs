@@ -351,8 +351,9 @@ fn print_upload_result(result: &UploadResponse) {
     println!();
     println!("\x1b[32m✓ Upload complete!\x1b[0m");
     println!("  Share code : {}", result.share_code);
+    println!("  Command    : share download {}", result.share_code);
     println!("  curl       : {}", result.curl_command);
-    println!("  Expires    : {}", result.expires_at);
+    println!("  Expires    : {}", crate::time::utc_to_local(&result.expires_at));
 
     if result.files.len() > 1 {
         println!("  Files:");

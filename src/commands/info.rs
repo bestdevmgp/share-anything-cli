@@ -42,7 +42,7 @@ pub async fn run(client: &ApiClient, code: String) -> Result<()> {
     println!("Share code  : {}", info.share_code);
     println!("Password    : {}", if info.has_password { "Yes" } else { "No" });
     println!("One-time    : {}", if info.is_one_time { "Yes" } else { "No" });
-    println!("Expires at  : {}", info.expires_at);
+    println!("Expires at  : {}", crate::time::utc_to_local(&info.expires_at));
     println!("Files ({}):", info.files.len());
     for f in &info.files {
         println!("  - {} ({})", f.file_name, format_size(f.file_size));

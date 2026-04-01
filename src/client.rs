@@ -11,7 +11,9 @@ pub struct ApiClient {
 impl ApiClient {
     pub fn new(config: &CliConfig) -> Result<Self> {
         let mut headers = HeaderMap::new();
-        headers.insert("User-Agent", HeaderValue::from_str(&format!("share-cli/{}", env!("CARGO_PKG_VERSION"))).unwrap());
+        let os_info = os_info::get();
+        let ua = format!("share-cli/{} ({} {})", env!("CARGO_PKG_VERSION"), os_info.os_type(), os_info.version());
+        headers.insert("User-Agent", HeaderValue::from_str(&ua).unwrap());
 
         if let Some(ref token) = config.token {
             headers.insert(
