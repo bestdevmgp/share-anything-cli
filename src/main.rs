@@ -2,6 +2,7 @@ mod client;
 mod commands;
 mod config;
 mod error;
+mod p2p;
 mod progress;
 pub mod time;
 
@@ -51,6 +52,10 @@ enum Commands {
         /// File name for stdin upload
         #[arg(short, long)]
         name: Option<String>,
+
+        /// Secure transfer (P2P, no server storage)
+        #[arg(short, long)]
+        secure: bool,
     },
 
     /// Download a shared file
@@ -101,6 +106,7 @@ async fn main() {
             expires,
             one_time,
             name,
+            secure,
         } => {
             let api_client = match client::ApiClient::new(&cfg) {
                 Ok(c) => c,
@@ -130,7 +136,11 @@ async fn main() {
                 std::process::exit(1);
             }
 
-            commands::upload::run(&api_client, files, stdin_data, name, password, expires, one_time).await
+            if secure {
+                commands::upload::run_secure(&api_client, files, stdin_data, name, password).await
+            } else {
+                commands::upload::run(&api_client, files, stdin_data, name, password, expires, one_time).await
+            }
         }
 
         Commands::Download {

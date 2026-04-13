@@ -29,3 +29,7 @@ console = "0.16.3"
 os_info = "3.14.0"
 chrono = "0.4.44"
 iana-time-zone = "0.1.65"
+webrtc = "0.11"
+tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
+url = "2"
+bytes = "1"

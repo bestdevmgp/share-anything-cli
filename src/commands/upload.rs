@@ -347,6 +347,16 @@ async fn upload_multipart(
     Ok(())
 }
 
+pub async fn run_secure(
+    _client: &ApiClient,
+    _files: Vec<PathBuf>,
+    _stdin_data: Option<Vec<u8>>,
+    _name: Option<String>,
+    _password: Option<String>,
+) -> Result<()> {
+    Err(crate::error::CliError::Other("Secure transfer not yet implemented".into()))
+}
+
 fn print_upload_result(result: &UploadResponse) {
     println!();
     println!("\x1b[32m✓ Upload complete!\x1b[0m");
