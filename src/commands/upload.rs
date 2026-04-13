@@ -348,13 +348,13 @@ async fn upload_multipart(
 }
 
 pub async fn run_secure(
-    _client: &ApiClient,
-    _files: Vec<PathBuf>,
-    _stdin_data: Option<Vec<u8>>,
-    _name: Option<String>,
-    _password: Option<String>,
+    client: &ApiClient,
+    files: Vec<PathBuf>,
+    stdin_data: Option<Vec<u8>>,
+    name: Option<String>,
+    password: Option<String>,
 ) -> Result<()> {
-    Err(crate::error::CliError::Other("Secure transfer not yet implemented".into()))
+    crate::p2p::sender::run(client, files, stdin_data, name, password).await
 }
 
 fn print_upload_result(result: &UploadResponse) {
