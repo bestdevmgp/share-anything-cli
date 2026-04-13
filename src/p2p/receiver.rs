@@ -141,7 +141,8 @@ pub async fn run(client: &ApiClient, share_code: String, output: Option<PathBuf>
                     SignalingMessage::PeerMatched { device_info, .. } => {
                         spinner.finish_and_clear();
                         let info_str = device_info.as_deref().unwrap_or("Unknown device");
-                        println!("  Connected: {}", info_str);
+                        println!("  \x1b[32m✓\x1b[0m Connected to sender ({})", info_str);
+                        println!();
                     }
                     SignalingMessage::Offer { sdp, .. } => {
                         let offer = RTCSessionDescription::offer(sdp)?;
