@@ -141,6 +141,7 @@ pub async fn run(
 
     // 7. Event loop
     let mut transfer_done = false;
+    let mut peer_matched = false;
     loop {
         tokio::select! {
             Some(msg) = sig.recv() => {
@@ -149,7 +150,9 @@ pub async fn run(
                     | SignalingMessage::DownloaderArrived { device_info, .. } => {
                         spinner.finish_and_clear();
                         let info_str = device_info.as_deref().unwrap_or("Unknown device");
-                        println!("  Connected: {}", info_str);
+                        println!("  \x1b[32m✓\x1b[0m Connected to receiver ({})", info_str);
+                        println!();
+                        peer_matched = true;
 
                         // Create and send SDP offer
                         let offer = rtc::create_offer(&pc).await?;
@@ -178,9 +181,10 @@ pub async fn run(
                         rtc::add_ice_candidate(&pc, init).await?;
                     }
                     SignalingMessage::DownloaderOffline { .. } => {
-                        spinner.finish_and_clear();
-                        println!("\x1b[33m⚠ Receiver disconnected\x1b[0m");
-                        break;
+                        if peer_matched {
+                            println!("\n\x1b[33m⚠ Receiver disconnected. Waiting for new receiver...\x1b[0m");
+                            peer_matched = false;
+                        }
                     }
                     SignalingMessage::Error { message } => {
                         spinner.finish_and_clear();
