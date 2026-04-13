@@ -43,28 +43,39 @@ pub async fn fetch_ice_servers(client: &ApiClient) -> Result<Vec<RTCIceServer>> 
                 .await
                 .map_err(|e| CliError::P2P(format!("Failed to parse TURN credentials: {}", e)))?;
 
-            let servers = creds
-                .ice_servers
-                .into_iter()
-                .filter(|s| !s.urls.is_empty())
-                .map(|s| {
-                    let has_creds = s.username.as_ref().is_some_and(|u| !u.is_empty())
-                        && s.credential.as_ref().is_some_and(|c| !c.is_empty());
-                    if has_creds {
-                        RTCIceServer {
-                            urls: s.urls,
-                            username: s.username.unwrap_or_default(),
-                            credential: s.credential.unwrap_or_default(),
-                            ..Default::default()
-                        }
-                    } else {
-                        RTCIceServer {
-                            urls: s.urls,
-                            ..Default::default()
-                        }
-                    }
-                })
-                .collect();
+            let mut servers: Vec<RTCIceServer> = Vec::new();
+
+            for s in creds.ice_servers {
+                if s.urls.is_empty() {
+                    continue;
+                }
+
+                let has_creds = s.username.as_ref().is_some_and(|u| !u.is_empty())
+                    && s.credential.as_ref().is_some_and(|c| !c.is_empty());
+
+                let has_turn_url = s.urls.iter().any(|u| u.starts_with("turn:") || u.starts_with("turns:"));
+
+                if has_turn_url && !has_creds {
+                    continue;
+                }
+
+                if has_creds {
+                    servers.push(RTCIceServer {
+                        urls: s.urls,
+                        username: s.username.unwrap_or_default(),
+                        credential: s.credential.unwrap_or_default(),
+                        credential_type: webrtc::ice_transport::ice_credential_type::RTCIceCredentialType::Password,
+                        ..Default::default()
+                    });
+                } else {
+                    // STUN-only, no credentials needed
+                    servers.push(RTCIceServer {
+                        urls: s.urls,
+                        ..Default::default()
+                    });
+                }
+            }
+
 
             Ok(servers)
         }
