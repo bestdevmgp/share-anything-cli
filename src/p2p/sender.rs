@@ -98,7 +98,6 @@ pub async fn run(
     // 3. Print share code + instructions
     println!();
     println!("\x1b[32m✓ Secure transfer ready!\x1b[0m");
-    println!("  Transfer : Secure (P2P, end-to-end)");
     println!("  Code     : {}", share_code);
     println!("  Command  : share download {}", share_code);
     println!("  Expires  : {}", crate::time::utc_to_local(&session.expires_at));

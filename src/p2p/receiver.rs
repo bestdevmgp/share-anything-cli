@@ -21,7 +21,6 @@ struct ReceivedFile {
 /// Run the P2P receiver (downloader) flow.
 pub async fn run(client: &ApiClient, share_code: String, output: Option<PathBuf>) -> Result<()> {
     println!();
-    println!("  Transfer : Secure (P2P, end-to-end)");
     println!("  Code     : {}", share_code);
     println!();
 

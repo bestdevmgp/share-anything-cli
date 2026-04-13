@@ -46,11 +46,23 @@ pub async fn fetch_ice_servers(client: &ApiClient) -> Result<Vec<RTCIceServer>> 
             let servers = creds
                 .ice_servers
                 .into_iter()
-                .map(|s| RTCIceServer {
-                    urls: s.urls,
-                    username: s.username.unwrap_or_default(),
-                    credential: s.credential.unwrap_or_default(),
-                    ..Default::default()
+                .filter(|s| !s.urls.is_empty())
+                .map(|s| {
+                    let has_creds = s.username.as_ref().is_some_and(|u| !u.is_empty())
+                        && s.credential.as_ref().is_some_and(|c| !c.is_empty());
+                    if has_creds {
+                        RTCIceServer {
+                            urls: s.urls,
+                            username: s.username.unwrap_or_default(),
+                            credential: s.credential.unwrap_or_default(),
+                            ..Default::default()
+                        }
+                    } else {
+                        RTCIceServer {
+                            urls: s.urls,
+                            ..Default::default()
+                        }
+                    }
                 })
                 .collect();
 
