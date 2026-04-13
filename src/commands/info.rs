@@ -8,6 +8,8 @@ struct FileInfoResponse {
     files: Vec<FileDetail>,
     has_password: bool,
     is_one_time: bool,
+    #[serde(default)]
+    transfer_type: Option<String>,
     expires_at: String,
 }
 
@@ -40,6 +42,9 @@ pub async fn run(client: &ApiClient, code: String) -> Result<()> {
 
     println!();
     println!("Share code  : {}", info.share_code);
+    if info.transfer_type.as_deref() == Some("p2p") {
+        println!("Transfer    : Secure (P2P)");
+    }
     println!("Password    : {}", if info.has_password { "Yes" } else { "No" });
     println!("One-time    : {}", if info.is_one_time { "Yes" } else { "No" });
     println!("Expires at  : {}", crate::time::utc_to_local(&info.expires_at));

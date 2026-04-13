@@ -11,6 +11,8 @@ struct FileInfoResponse {
     share_code: String,
     files: Vec<FileDetail>,
     has_password: bool,
+    #[serde(default)]
+    transfer_type: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -45,6 +47,10 @@ pub async fn run(
     }
 
     let info: FileInfoResponse = info_resp.json().await?;
+
+    if info.transfer_type.as_deref() == Some("p2p") {
+        return crate::p2p::receiver::run(client, code, output).await;
+    }
 
     if info.has_password && password.is_none() {
         return Err(CliError::Other(
