@@ -5,13 +5,8 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio_tungstenite::tungstenite::Message;
 
-/// WebSocket signaling client for P2P transfer.
-///
-/// Spawns background tasks for reading, writing, and keepalive pings.
 pub struct SignalingClient {
-    /// Send signaling messages to the WebSocket.
     pub sender: mpsc::UnboundedSender<SignalingMessage>,
-    /// Receive signaling messages from the WebSocket (Pong filtered out).
     pub receiver: mpsc::UnboundedReceiver<SignalingMessage>,
     read_handle: JoinHandle<()>,
     write_handle: JoinHandle<()>,
@@ -19,9 +14,6 @@ pub struct SignalingClient {
 }
 
 impl SignalingClient {
-    /// Connect to the signaling WebSocket server.
-    ///
-    /// Converts the API base URL from http(s) to ws(s) and connects to `/ws/signaling`.
     pub async fn connect(api_base_url: &str) -> Result<Self> {
         let ws_url = api_base_url
             .replace("https://", "wss://")
@@ -35,16 +27,10 @@ impl SignalingClient {
 
         let (mut ws_sink, mut ws_stream_rx) = ws_stream.split();
 
-        // Channel: outgoing signaling messages -> WS write task
         let (out_tx, mut out_rx) = mpsc::unbounded_channel::<SignalingMessage>();
-
-        // Channel: WS read task -> incoming signaling messages
         let (in_tx, in_rx) = mpsc::unbounded_channel::<SignalingMessage>();
-
-        // Channel for ping task to send pings through the write task
         let (ping_tx, mut ping_rx) = mpsc::unbounded_channel::<()>();
 
-        // Write task: sends outgoing signaling messages and pings
         let write_handle = tokio::spawn(async move {
             loop {
                 tokio::select! {
@@ -68,13 +54,11 @@ impl SignalingClient {
             }
         });
 
-        // Read task: reads from WS and forwards to in_tx (filters out Pong)
         let read_handle = tokio::spawn(async move {
             while let Some(Ok(msg)) = ws_stream_rx.next().await {
                 match msg {
                     Message::Text(text) => {
                         if let Ok(sig_msg) = serde_json::from_str::<SignalingMessage>(&text) {
-                            // Filter out Pong messages
                             if matches!(sig_msg, SignalingMessage::Pong {}) {
                                 continue;
                             }
@@ -89,11 +73,9 @@ impl SignalingClient {
             }
         });
 
-        // Ping keepalive task
         let ping_handle = tokio::spawn(async move {
             let mut interval =
                 tokio::time::interval(std::time::Duration::from_secs(WS_PING_INTERVAL_SECS));
-            // Skip the first immediate tick
             interval.tick().await;
             loop {
                 interval.tick().await;
@@ -112,19 +94,16 @@ impl SignalingClient {
         })
     }
 
-    /// Send a signaling message.
     pub fn send(&self, msg: SignalingMessage) -> Result<()> {
         self.sender
             .send(msg)
             .map_err(|e| CliError::WebSocket(format!("Send failed: {}", e)))
     }
 
-    /// Receive the next signaling message (Pong messages are already filtered).
     pub async fn recv(&mut self) -> Option<SignalingMessage> {
         self.receiver.recv().await
     }
 
-    /// Shut down all background tasks.
     pub fn shutdown(self) {
         self.read_handle.abort();
         self.write_handle.abort();

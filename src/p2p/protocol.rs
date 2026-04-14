@@ -1,19 +1,10 @@
 use serde::{Deserialize, Serialize};
 
-/// Data channel chunk size (64KB)
 pub const DC_CHUNK_SIZE: usize = 65536;
-/// Pause sending when buffered amount exceeds this (1MB)
 pub const BUFFERED_AMOUNT_HIGH: usize = 1_048_576;
-/// Resume sending when buffered amount drops below this (256KB)
-#[allow(dead_code)]
-pub const BUFFERED_AMOUNT_LOW: usize = 262_144;
-/// Sent after all file chunks to indicate end of file
 pub const EOF_SIGNAL: &str = "__EOF__";
-/// WebSocket ping interval in seconds
 pub const WS_PING_INTERVAL_SECS: u64 = 30;
 
-/// Signaling messages matching the backend's `SignalingMessage` enum exactly.
-/// Uses `#[serde(tag = "type", rename_all = "snake_case")]` for wire format.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum SignalingMessage {
@@ -28,11 +19,6 @@ pub enum SignalingMessage {
         peer_id: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         file_name: Option<String>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        device_info: Option<String>,
-    },
-    UploaderInfo {
-        share_code: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         device_info: Option<String>,
     },
@@ -93,13 +79,11 @@ pub enum PeerRole {
     Downloader,
 }
 
-/// File metadata sent over the DataChannel before binary chunks.
-/// Uses camelCase field names to match the web frontend protocol.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FileMetadata {
     #[serde(rename = "type")]
-    pub msg_type: String, // always "file_metadata"
+    pub msg_type: String,
     pub file_name: String,
     pub file_size: u64,
     pub file_type: String,
@@ -116,8 +100,37 @@ impl FileMetadata {
     }
 }
 
-/// Returns a device info string like "CLI, macOS 14.0"
+pub fn encode_ice_candidate(
+    candidate: &str,
+    sdp_mid: &Option<String>,
+    sdp_mline_index: &Option<u16>,
+) -> String {
+    serde_json::json!({
+        "candidate": candidate,
+        "sdpMid": sdp_mid,
+        "sdpMLineIndex": sdp_mline_index,
+    })
+    .to_string()
+}
+
+pub fn decode_ice_candidate(json_str: &str) -> Option<(String, Option<String>, Option<u16>)> {
+    if let Ok(v) = serde_json::from_str::<serde_json::Value>(json_str) {
+        if let Some(candidate) = v.get("candidate").and_then(|v| v.as_str()) {
+            let sdp_mid = v.get("sdpMid").and_then(|v| v.as_str()).map(|s| s.to_string());
+            let sdp_mline_index = v
+                .get("sdpMLineIndex")
+                .and_then(|v| v.as_u64())
+                .map(|n| n as u16);
+            return Some((candidate.to_string(), sdp_mid, sdp_mline_index));
+        }
+    }
+    if json_str.contains("candidate:") || json_str.starts_with("a=") {
+        return Some((json_str.to_string(), None, None));
+    }
+    None
+}
+
 pub fn device_info_string() -> String {
     let info = os_info::get();
-    format!("CLI, {} {}", info.os_type(), info.version())
+    format!("{} {} (CLI)", info.os_type(), info.version())
 }
