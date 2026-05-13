@@ -23,7 +23,10 @@ use std::path::PathBuf;
   share download ABC123              Download by share code
   share info ABC123                  Check file info
   share login sa_your_token_here      Save personal token
-  share list                         View upload history"
+  share history                      View upload history
+  share download-history             View download history
+  share delete ABC123                Delete a share by code
+  share logs ABC123                  View download logs for a share"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -81,8 +84,27 @@ enum Commands {
         code: String,
     },
 
-    /// List your upload history (requires personal token)
-    List,
+    /// View your upload history (requires personal token)
+    #[command(alias = "list")]
+    History,
+
+    /// View your download history (requires personal token)
+    #[command(name = "download-history")]
+    DownloadHistory,
+
+    /// Delete a share by its code (requires personal token)
+    #[command(alias = "remove")]
+    Delete {
+        /// Share code to delete
+        code: String,
+    },
+
+    /// View download logs for a share (requires personal token)
+    #[command(alias = "log")]
+    Logs {
+        /// Share code to inspect
+        code: String,
+    },
 
     /// Save personal token for authenticated access
     Login {
@@ -170,7 +192,7 @@ async fn main() {
             commands::info::run(&api_client, code).await
         }
 
-        Commands::List => {
+        Commands::History => {
             let api_client = match client::ApiClient::new(&cfg) {
                 Ok(c) => c,
                 Err(e) => {
@@ -179,6 +201,39 @@ async fn main() {
                 }
             };
             commands::list::run(&api_client).await
+        }
+
+        Commands::DownloadHistory => {
+            let api_client = match client::ApiClient::new(&cfg) {
+                Ok(c) => c,
+                Err(e) => {
+                    eprintln!("\x1b[31mError: {}\x1b[0m", e);
+                    std::process::exit(1);
+                }
+            };
+            commands::download_history::run(&api_client).await
+        }
+
+        Commands::Delete { code } => {
+            let api_client = match client::ApiClient::new(&cfg) {
+                Ok(c) => c,
+                Err(e) => {
+                    eprintln!("\x1b[31mError: {}\x1b[0m", e);
+                    std::process::exit(1);
+                }
+            };
+            commands::delete::run(&api_client, code).await
+        }
+
+        Commands::Logs { code } => {
+            let api_client = match client::ApiClient::new(&cfg) {
+                Ok(c) => c,
+                Err(e) => {
+                    eprintln!("\x1b[31mError: {}\x1b[0m", e);
+                    std::process::exit(1);
+                }
+            };
+            commands::logs::run(&api_client, code).await
         }
 
         Commands::Login { token } => commands::login::run(token, &cfg).await,

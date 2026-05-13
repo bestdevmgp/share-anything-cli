@@ -2,5 +2,8 @@ pub mod upload;
 pub mod download;
 pub mod info;
 pub mod list;
+pub mod download_history;
+pub mod delete;
+pub mod logs;
 pub mod login;
 pub mod logout;
