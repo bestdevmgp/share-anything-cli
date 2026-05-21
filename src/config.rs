@@ -38,6 +38,7 @@ impl CliConfig {
     pub fn server_url(&self) -> String {
         self.server_url
             .clone()
-            .unwrap_or_else(|| "https://share-api.mingyu.dev".to_string())
+            // .unwrap_or_else(|| "https://share-api.mingyu.dev".to_string())
+            .unwrap_or_else(|| "http://localhost:8080".to_string())
     }
 }

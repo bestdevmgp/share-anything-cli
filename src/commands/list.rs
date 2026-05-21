@@ -10,7 +10,7 @@ pub async fn run(client: &ApiClient) -> Result<()> {
 
     let resp = client
         .client
-        .get(client.url("/cli/user/uploads"))
+        .get(client.url("/v1/me/uploads"))
         .send()
         .await?;
 
@@ -19,8 +19,9 @@ pub async fn run(client: &ApiClient) -> Result<()> {
         let body: serde_json::Value = resp.json().await.unwrap_or_default();
         return Err(CliError::Api {
             status,
-            message: body["message"]
+            message: body["error"]["message"]
                 .as_str()
+                .or_else(|| body["message"].as_str())
                 .unwrap_or("Failed to fetch uploads")
                 .to_string(),
         });

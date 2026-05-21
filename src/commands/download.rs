@@ -42,7 +42,7 @@ pub async fn run(
             message: body["message"]
                 .as_str()
                 .unwrap_or("File not found")
-                .to_string(),
+                .to_string(), // /cli/download/{code}/info uses old envelope
         });
     }
 
@@ -58,7 +58,7 @@ pub async fn run(
         ));
     }
 
-    let mut url = client.url(&format!("/cli/download/{}", code));
+    let mut url = client.url(&format!("/v1/shares/{}/download", code));
     let mut params = Vec::new();
     if let Some(ref pw) = password {
         params.push(format!("password={}", pw));
@@ -77,8 +77,9 @@ pub async fn run(
         let body: serde_json::Value = resp.json().await.unwrap_or_default();
         return Err(CliError::Api {
             status,
-            message: body["message"]
+            message: body["error"]["message"]
                 .as_str()
+                .or_else(|| body["message"].as_str())
                 .unwrap_or("Download failed")
                 .to_string(),
         });

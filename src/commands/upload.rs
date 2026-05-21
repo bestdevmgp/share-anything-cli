@@ -10,7 +10,6 @@ use std::path::PathBuf;
 struct UploadResponse {
     share_code: String,
     files: Vec<String>,
-    curl_command: String,
     expires_at: String,
 }
 
@@ -149,7 +148,7 @@ async fn upload_direct(
 
     let resp = client
         .client
-        .post(client.url("/cli/upload"))
+        .post(client.url("/v1/uploads"))
         .multipart(form)
         .send()
         .await?;
@@ -159,10 +158,7 @@ async fn upload_direct(
     if !resp.status().is_success() {
         let status = resp.status().as_u16();
         let body: serde_json::Value = resp.json().await.unwrap_or_default();
-        let msg = body["message"]
-            .as_str()
-            .unwrap_or("Unknown error")
-            .to_string();
+        let msg = extract_error_message(&body, "Unknown error");
         return Err(CliError::Api {
             status,
             message: msg,
@@ -207,7 +203,7 @@ async fn upload_multipart(
 
     let resp = client
         .client
-        .post(client.url("/cli/upload/multipart/init"))
+        .post(client.url("/v1/uploads/multipart"))
         .json(&init_body)
         .send()
         .await?;
@@ -219,7 +215,7 @@ async fn upload_multipart(
         let body: serde_json::Value = resp.json().await.unwrap_or_default();
         return Err(CliError::Api {
             status,
-            message: body["message"].as_str().unwrap_or("Init failed").to_string(),
+            message: extract_error_message(&body, "Init failed"),
         });
     }
 
@@ -233,7 +229,7 @@ async fn upload_multipart(
     if file_init.total_parts <= 1 {
         let presign_resp = client
             .client
-            .post(client.url("/cli/upload/multipart/presign-parts"))
+            .post(client.url(&format!("/v1/uploads/multipart/{}/parts", init.upload_session_id)))
             .json(&serde_json::json!({
                 "upload_session_id": init.upload_session_id,
                 "storage_key": file_init.storage_key,
@@ -277,7 +273,7 @@ async fn upload_multipart(
 
             let presign_resp = client
                 .client
-                .post(client.url("/cli/upload/multipart/presign-parts"))
+                .post(client.url(&format!("/v1/uploads/multipart/{}/parts", init.upload_session_id)))
                 .json(&serde_json::json!({
                     "upload_session_id": init.upload_session_id,
                     "storage_key": file_init.storage_key,
@@ -314,7 +310,7 @@ async fn upload_multipart(
 
     let complete_resp = client
         .client
-        .post(client.url("/cli/upload/multipart/complete"))
+        .post(client.url(&format!("/v1/uploads/multipart/{}/complete", init.upload_session_id)))
         .json(&serde_json::json!({
             "upload_session_id": init.upload_session_id,
             "share_code": init.share_code,
@@ -335,10 +331,7 @@ async fn upload_multipart(
         let body: serde_json::Value = complete_resp.json().await.unwrap_or_default();
         return Err(CliError::Api {
             status,
-            message: body["message"]
-                .as_str()
-                .unwrap_or("Complete failed")
-                .to_string(),
+            message: extract_error_message(&body, "Complete failed"),
         });
     }
 
@@ -357,12 +350,23 @@ pub async fn run_secure(
     crate::p2p::sender::run(client, files, stdin_data, name, password).await
 }
 
+fn extract_error_message(body: &serde_json::Value, fallback: &str) -> String {
+    // v1 envelope: { "error": { "code": "...", "message": "..." } }
+    if let Some(msg) = body["error"]["message"].as_str() {
+        return msg.to_string();
+    }
+    // legacy /cli/* envelope: { "message": "..." }
+    if let Some(msg) = body["message"].as_str() {
+        return msg.to_string();
+    }
+    fallback.to_string()
+}
+
 fn print_upload_result(result: &UploadResponse) {
     println!();
     println!("\x1b[32m✓ Upload complete!\x1b[0m");
     println!("  Share code : {}", result.share_code);
     println!("  Command    : share download {}", result.share_code);
-    println!("  curl       : {}", result.curl_command);
     println!("  Expires    : {}", crate::time::utc_to_local(&result.expires_at));
 
     if result.files.len() > 1 {

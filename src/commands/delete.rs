@@ -10,7 +10,7 @@ pub async fn run(client: &ApiClient, code: String) -> Result<()> {
 
     let resp = client
         .client
-        .delete(client.url(&format!("/cli/user/uploads/{}", code)))
+        .delete(client.url(&format!("/v1/me/uploads/{}", code)))
         .send()
         .await?;
 
@@ -19,8 +19,9 @@ pub async fn run(client: &ApiClient, code: String) -> Result<()> {
         let body: serde_json::Value = resp.json().await.unwrap_or_default();
         return Err(CliError::Api {
             status,
-            message: body["message"]
+            message: body["error"]["message"]
                 .as_str()
+                .or_else(|| body["message"].as_str())
                 .unwrap_or("Failed to delete share")
                 .to_string(),
         });
