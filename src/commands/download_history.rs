@@ -1,5 +1,6 @@
 use crate::client::ApiClient;
 use crate::error::{CliError, Result};
+use crate::format::{format_size, pad_display, truncate_display};
 
 pub async fn run(client: &ApiClient) -> Result<()> {
     if !client.is_authenticated() {
@@ -37,8 +38,14 @@ pub async fn run(client: &ApiClient) -> Result<()> {
         }
 
         println!();
-        println!("{:<10} {:<30} {:<12} {:<20}", "CODE", "FILE", "SIZE", "DOWNLOADED");
-        println!("{}", "-".repeat(72));
+        println!(
+            "{} {} {} {}",
+            pad_display("CODE", 10),
+            pad_display("FILE", 40),
+            pad_display("SIZE", 10),
+            pad_display("DOWNLOADED", 20),
+        );
+        println!("{}", "-".repeat(83));
 
         for d in downloads {
             let code = d["share_code"].as_str().unwrap_or("-");
@@ -47,13 +54,15 @@ pub async fn run(client: &ApiClient) -> Result<()> {
             let downloaded_raw = d["downloaded_at"].as_str().unwrap_or("-");
             let downloaded = crate::time::utc_to_local(downloaded_raw);
 
-            let display_name = if name.len() > 28 {
-                format!("{}...", &name[..25])
-            } else {
-                name.to_string()
-            };
+            let display_name = truncate_display(name, 40);
 
-            println!("{:<10} {:<30} {:<12} {:<20}", code, display_name, format_size(size), downloaded);
+            println!(
+                "{} {} {} {}",
+                pad_display(code, 10),
+                pad_display(&display_name, 40),
+                pad_display(&format_size(size), 10),
+                pad_display(&downloaded, 20),
+            );
         }
         println!();
     } else {
@@ -63,18 +72,3 @@ pub async fn run(client: &ApiClient) -> Result<()> {
     Ok(())
 }
 
-fn format_size(bytes: i64) -> String {
-    const KB: i64 = 1024;
-    const MB: i64 = 1024 * KB;
-    const GB: i64 = 1024 * MB;
-
-    if bytes >= GB {
-        format!("{:.1} GB", bytes as f64 / GB as f64)
-    } else if bytes >= MB {
-        format!("{:.1} MB", bytes as f64 / MB as f64)
-    } else if bytes >= KB {
-        format!("{:.1} KB", bytes as f64 / KB as f64)
-    } else {
-        format!("{} B", bytes)
-    }
-}

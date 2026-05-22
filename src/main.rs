@@ -2,6 +2,7 @@ mod client;
 mod commands;
 mod config;
 mod error;
+pub mod format;
 mod p2p;
 mod progress;
 pub mod time;

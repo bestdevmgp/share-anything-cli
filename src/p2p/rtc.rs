@@ -58,7 +58,6 @@ pub async fn fetch_ice_servers(client: &ApiClient) -> Result<Vec<RTCIceServer>> 
                         username: s.username.unwrap_or_default(),
                         credential: s.credential.unwrap_or_default(),
                         credential_type: webrtc::ice_transport::ice_credential_type::RTCIceCredentialType::Password,
-                        ..Default::default()
                     });
                 } else {
                     servers.push(RTCIceServer {

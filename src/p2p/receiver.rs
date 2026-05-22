@@ -226,7 +226,7 @@ pub async fn run(client: &ApiClient, share_code: String, output: Option<PathBuf>
     for file in &received_files {
         let dest = output_dir.join(&file.name);
         std::fs::write(&dest, &file.data)?;
-        println!("  Saved: {} ({})", dest.display(), format_size(file.data.len() as u64));
+        println!("  Saved: {} ({})", dest.display(), crate::format::format_size_u64(file.data.len() as u64));
     }
 
     let _ = pc.close().await;
@@ -241,20 +241,6 @@ pub async fn run(client: &ApiClient, share_code: String, output: Option<PathBuf>
     Ok(())
 }
 
-fn format_size(bytes: u64) -> String {
-    const KB: u64 = 1024;
-    const MB: u64 = 1024 * KB;
-    const GB: u64 = 1024 * MB;
-    if bytes >= GB {
-        format!("{:.1} GB", bytes as f64 / GB as f64)
-    } else if bytes >= MB {
-        format!("{:.1} MB", bytes as f64 / MB as f64)
-    } else if bytes >= KB {
-        format!("{:.1} KB", bytes as f64 / KB as f64)
-    } else {
-        format!("{} B", bytes)
-    }
-}
 
 fn uuid_simple() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};

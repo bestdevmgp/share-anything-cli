@@ -50,25 +50,10 @@ pub async fn run(client: &ApiClient, code: String) -> Result<()> {
     println!("Expires at  : {}", crate::time::utc_to_local(&info.expires_at));
     println!("Files ({}):", info.files.len());
     for f in &info.files {
-        println!("  - {} ({})", f.file_name, format_size(f.file_size));
+        println!("  - {} ({})", f.file_name, crate::format::format_size(f.file_size));
     }
     println!();
 
     Ok(())
 }
 
-fn format_size(bytes: i64) -> String {
-    const KB: i64 = 1024;
-    const MB: i64 = 1024 * KB;
-    const GB: i64 = 1024 * MB;
-
-    if bytes >= GB {
-        format!("{:.1} GB", bytes as f64 / GB as f64)
-    } else if bytes >= MB {
-        format!("{:.1} MB", bytes as f64 / MB as f64)
-    } else if bytes >= KB {
-        format!("{:.1} KB", bytes as f64 / KB as f64)
-    } else {
-        format!("{} B", bytes)
-    }
-}

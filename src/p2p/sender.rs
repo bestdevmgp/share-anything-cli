@@ -35,6 +35,7 @@ struct P2PCreateResponse {
     share_code: String,
     #[allow(dead_code)]
     files: Vec<String>,
+    #[allow(dead_code)]
     expires_at: String,
 }
 
@@ -92,13 +93,12 @@ pub async fn run(
     println!("\x1b[32m✓ Secure transfer ready\x1b[0m");
     println!("  Code     : {}", share_code);
     println!("  Command  : share download {}", share_code);
-    println!("  Expires  : {}", crate::time::utc_to_local(&session.expires_at));
     if prepared.len() == 1 {
-        println!("  File     : {} ({})", prepared[0].name, format_size(prepared[0].data.len() as u64));
+        println!("  File     : {} ({})", prepared[0].name, crate::format::format_size_u64(prepared[0].data.len() as u64));
     } else {
         println!("  Files    : {} files", prepared.len());
         for f in &prepared {
-            println!("    - {} ({})", f.name, format_size(f.data.len() as u64));
+            println!("    - {} ({})", f.name, crate::format::format_size_u64(f.data.len() as u64));
         }
     }
     println!();
@@ -311,20 +311,6 @@ fn prepare_files(
     Ok(prepared)
 }
 
-fn format_size(bytes: u64) -> String {
-    const KB: u64 = 1024;
-    const MB: u64 = 1024 * KB;
-    const GB: u64 = 1024 * MB;
-    if bytes >= GB {
-        format!("{:.1} GB", bytes as f64 / GB as f64)
-    } else if bytes >= MB {
-        format!("{:.1} MB", bytes as f64 / MB as f64)
-    } else if bytes >= KB {
-        format!("{:.1} KB", bytes as f64 / KB as f64)
-    } else {
-        format!("{} B", bytes)
-    }
-}
 
 fn uuid_simple() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};

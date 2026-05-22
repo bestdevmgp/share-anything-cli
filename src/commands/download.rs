@@ -135,7 +135,7 @@ pub async fn run(
 
     use tokio::io::AsyncWriteExt;
     while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(|e| CliError::Http(e))?;
+        let chunk = chunk.map_err(CliError::Http)?;
         file.write_all(&chunk).await?;
         pb.inc(chunk.len() as u64);
     }
