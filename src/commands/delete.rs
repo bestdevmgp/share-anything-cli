@@ -4,7 +4,7 @@ use crate::error::{CliError, Result};
 pub async fn run(client: &ApiClient, code: String) -> Result<()> {
     if !client.is_authenticated() {
         return Err(CliError::Other(
-            "Personal token required. Use `share login <token>` first.".to_string(),
+            "Personal token required. Use `share login <token>` first".to_string(),
         ));
     }
 

@@ -5,7 +5,7 @@ use crate::format::{format_size, pad_display, truncate_display};
 pub async fn run(client: &ApiClient) -> Result<()> {
     if !client.is_authenticated() {
         return Err(CliError::Other(
-            "Personal token required. Use `share login <token>` first.".to_string(),
+            "Personal token required. Use `share login <token>` first".to_string(),
         ));
     }
 
