@@ -148,7 +148,7 @@ async fn upload_direct(
 
     let resp = client
         .client
-        .post(client.url("/v1/uploads"))
+        .post(client.url("/cli/uploads"))
         .multipart(form)
         .send()
         .await?;
@@ -203,7 +203,7 @@ async fn upload_multipart(
 
     let resp = client
         .client
-        .post(client.url("/v1/uploads/multipart"))
+        .post(client.url("/cli/uploads/multipart"))
         .json(&init_body)
         .send()
         .await?;
@@ -229,7 +229,7 @@ async fn upload_multipart(
     if file_init.total_parts <= 1 {
         let presign_resp = client
             .client
-            .post(client.url(&format!("/v1/uploads/multipart/{}/parts", init.upload_session_id)))
+            .post(client.url(&format!("/cli/uploads/multipart/{}/parts", init.upload_session_id)))
             .json(&serde_json::json!({
                 "upload_session_id": init.upload_session_id,
                 "storage_key": file_init.storage_key,
@@ -273,7 +273,7 @@ async fn upload_multipart(
 
             let presign_resp = client
                 .client
-                .post(client.url(&format!("/v1/uploads/multipart/{}/parts", init.upload_session_id)))
+                .post(client.url(&format!("/cli/uploads/multipart/{}/parts", init.upload_session_id)))
                 .json(&serde_json::json!({
                     "upload_session_id": init.upload_session_id,
                     "storage_key": file_init.storage_key,
@@ -310,7 +310,7 @@ async fn upload_multipart(
 
     let complete_resp = client
         .client
-        .post(client.url(&format!("/v1/uploads/multipart/{}/complete", init.upload_session_id)))
+        .post(client.url(&format!("/cli/uploads/multipart/{}/complete", init.upload_session_id)))
         .json(&serde_json::json!({
             "upload_session_id": init.upload_session_id,
             "share_code": init.share_code,

@@ -58,7 +58,7 @@ pub async fn run(
         ));
     }
 
-    let mut url = client.url(&format!("/v1/shares/{}/download", code));
+    let mut url = client.url(&format!("/cli/shares/{}/download", code));
     let mut params = Vec::new();
     if let Some(ref pw) = password {
         params.push(format!("password={}", pw));

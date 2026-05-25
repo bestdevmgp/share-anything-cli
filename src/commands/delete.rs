@@ -10,7 +10,7 @@ pub async fn run(client: &ApiClient, code: String) -> Result<()> {
 
     let resp = client
         .client
-        .delete(client.url(&format!("/v1/me/uploads/{}", code)))
+        .delete(client.url(&format!("/cli/me/uploads/{}", code)))
         .send()
         .await?;
 

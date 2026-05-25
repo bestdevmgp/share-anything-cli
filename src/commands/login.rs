@@ -37,9 +37,9 @@ pub async fn run(token: Option<String>, config: &CliConfig) -> Result<()> {
 }
 
 async fn run_token_login(token: String) -> Result<()> {
-    if !token.starts_with("sa_") {
+    if !token.starts_with("sat_") {
         return Err(CliError::Other(
-            "Invalid token format. Tokens should start with 'sa_'".to_string(),
+            "Invalid token format. Tokens should start with 'sat_'".to_string(),
         ));
     }
 

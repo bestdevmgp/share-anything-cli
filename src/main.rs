@@ -23,7 +23,7 @@ use std::path::PathBuf;
   echo 'hi' | share upload -n hi.txt Pipe stdin
   share download ABC123              Download by share code
   share info ABC123                  Check file info
-  share login sa_your_token_here      Save personal token
+  share login sat_your_token_here     Save personal token
   share history                      View upload history
   share download-history             View download history
   share delete ABC123                Delete a share by code
@@ -109,7 +109,7 @@ enum Commands {
 
     /// Save personal token for authenticated access
     Login {
-        /// Personal token (starts with sa_). If omitted, opens browser sign-in
+        /// Personal token (starts with sat_). If omitted, opens browser sign-in
         token: Option<String>,
     },
 

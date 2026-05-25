@@ -11,7 +11,7 @@ pub async fn run(client: &ApiClient) -> Result<()> {
 
     let resp = client
         .client
-        .get(client.url("/v1/me/uploads"))
+        .get(client.url("/cli/me/uploads"))
         .send()
         .await?;
 
