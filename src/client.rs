@@ -2,10 +2,12 @@ use crate::config::CliConfig;
 use crate::error::{CliError, Result};
 use reqwest::header::{HeaderMap, HeaderValue};
 
+#[derive(Clone)]
 pub struct ApiClient {
     pub client: reqwest::Client,
     pub base_url: String,
     pub token: Option<String>,
+    pub user_name: Option<String>,
 }
 
 impl ApiClient {
@@ -30,6 +32,7 @@ impl ApiClient {
             client,
             base_url: config.server_url(),
             token: config.token.clone(),
+            user_name: config.user_name.clone(),
         })
     }
 

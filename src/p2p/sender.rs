@@ -1,49 +1,10 @@
 use crate::client::ApiClient;
-use crate::error::{CliError, Result};
-use crate::p2p::protocol::{
-    decode_ice_candidate, device_info_string, encode_ice_candidate, FileMetadata,
-    SignalingMessage, BUFFERED_AMOUNT_HIGH, DC_CHUNK_SIZE, EOF_SIGNAL,
-};
-use crate::p2p::{rtc, signaling::SignalingClient};
+use crate::core::p2p::sender::{SenderEvent, SenderEventFn, SenderOptions};
+use crate::error::Result;
 use crate::progress::{create_spinner, create_upload_progress, finish_progress};
-use serde::{Deserialize, Serialize};
+use indicatif::ProgressBar;
 use std::path::PathBuf;
-use std::sync::Arc;
-use tokio::sync::mpsc;
-use webrtc::data_channel::RTCDataChannel;
-use webrtc::ice_transport::ice_candidate::RTCIceCandidateInit;
-use webrtc::ice_transport::ice_connection_state::RTCIceConnectionState;
-use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
-
-#[derive(Debug, Serialize)]
-struct P2PFileInfo {
-    name: String,
-    size: i64,
-    #[serde(rename = "type")]
-    content_type: String,
-}
-
-#[derive(Debug, Serialize)]
-struct P2PCreateRequest {
-    files: Vec<P2PFileInfo>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    password: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct P2PCreateResponse {
-    share_code: String,
-    #[allow(dead_code)]
-    files: Vec<String>,
-    #[allow(dead_code)]
-    expires_at: String,
-}
-
-struct PreparedFile {
-    name: String,
-    data: Vec<u8>,
-    content_type: String,
-}
+use std::sync::{Arc, Mutex};
 
 pub async fn run(
     client: &ApiClient,
@@ -52,271 +13,109 @@ pub async fn run(
     name: Option<String>,
     password: Option<String>,
 ) -> Result<()> {
-    let prepared = prepare_files(files, stdin_data, name)?;
-    if prepared.is_empty() {
-        return Err(CliError::Other("No files to send".into()));
-    }
+    let spinner_slot: Arc<Mutex<Option<ProgressBar>>> = Arc::new(Mutex::new(None));
+    let pb_slot: Arc<Mutex<Option<ProgressBar>>> = Arc::new(Mutex::new(None));
 
-    let file_infos: Vec<P2PFileInfo> = prepared
-        .iter()
-        .map(|f| P2PFileInfo {
-            name: f.name.clone(),
-            size: f.data.len() as i64,
-            content_type: f.content_type.clone(),
-        })
-        .collect();
+    let sslot = spinner_slot.clone();
+    let pslot = pb_slot.clone();
 
-    let resp = client
-        .client
-        .post(client.url("/cli/p2p/create"))
-        .json(&P2PCreateRequest {
-            files: file_infos,
-            password: password.clone(),
-        })
-        .send()
-        .await?;
-
-    if !resp.status().is_success() {
-        let status = resp.status().as_u16();
-        let body: serde_json::Value = resp.json().await.unwrap_or_default();
-        let msg = body["message"]
-            .as_str()
-            .unwrap_or("Failed to create P2P session")
-            .to_string();
-        return Err(CliError::Api { status, message: msg });
-    }
-
-    let session: P2PCreateResponse = resp.json().await?;
-    let share_code = session.share_code.clone();
-
-    println!();
-    println!("\x1b[32m✓ Secure transfer ready\x1b[0m");
-    println!("  Code     : {}", share_code);
-    println!("  Command  : share download {}", share_code);
-    if prepared.len() == 1 {
-        println!("  File     : {} ({})", prepared[0].name, crate::format::format_size_u64(prepared[0].data.len() as u64));
-    } else {
-        println!("  Files    : {} files", prepared.len());
-        for f in &prepared {
-            println!("    - {} ({})", f.name, crate::format::format_size_u64(f.data.len() as u64));
-        }
-    }
-    println!();
-
-    let mut sig = SignalingClient::connect(&client.base_url).await?;
-    let ice_servers = rtc::fetch_ice_servers(client).await?;
-    let pc = rtc::create_peer_connection(ice_servers).await?;
-    let dc = rtc::create_data_channel(&pc).await?;
-
-    let (ice_tx, mut ice_rx) = mpsc::unbounded_channel::<RTCIceCandidateInit>();
-    let (state_tx, mut state_rx) = mpsc::unbounded_channel::<RTCIceConnectionState>();
-    rtc::setup_ice_candidate_handler(&pc, ice_tx);
-    rtc::setup_connection_state_handler(&pc, state_tx);
-
-    let peer_id = uuid_simple();
-
-    sig.send(SignalingMessage::UploaderReady {
-        share_code: share_code.clone(),
-        peer_id: peer_id.clone(),
-        device_info: Some(device_info_string()),
-    })?;
-
-    let spinner = create_spinner("Waiting for receiver to connect...");
-
-    let mut transfer_done = false;
-    let mut peer_matched = false;
-    loop {
-        tokio::select! {
-            Some(msg) = sig.recv() => {
-                match msg {
-                    SignalingMessage::DownloaderArrived { device_info, .. } => {
-                        spinner.finish_and_clear();
-                        let info_str = device_info.as_deref().unwrap_or("Unknown device");
-                        println!("  \x1b[36m→\x1b[0m Receiver arrived ({}), waiting for download to start...", info_str);
+    let on_event: SenderEventFn = Arc::new(move |ev| {
+        match ev {
+            SenderEvent::Created { share_code, files } => {
+                println!();
+                println!("\x1b[32m✓ Secure transfer ready\x1b[0m");
+                println!("  Code     : {}", share_code);
+                println!("  Command  : share download {}", share_code);
+                if files.len() == 1 {
+                    println!(
+                        "  File     : {} ({})",
+                        files[0].name,
+                        crate::format::format_size_u64(files[0].size)
+                    );
+                } else {
+                    println!("  Files    : {} files", files.len());
+                    for f in &files {
+                        println!(
+                            "    - {} ({})",
+                            f.name,
+                            crate::format::format_size_u64(f.size)
+                        );
                     }
-                    SignalingMessage::PeerMatched { device_info, .. } => {
-                        spinner.finish_and_clear();
-                        let info_str = device_info.as_deref().unwrap_or("Unknown device");
-                        println!("  \x1b[32m✓\x1b[0m Connected to receiver ({})", info_str);
-                        println!();
-                        peer_matched = true;
-
-                        let offer = rtc::create_offer(&pc).await?;
-                        sig.send(SignalingMessage::Offer {
-                            share_code: share_code.clone(),
-                            sdp: offer.sdp,
-                            peer_id: peer_id.clone(),
-                        })?;
-                    }
-                    SignalingMessage::Answer { sdp, .. } => {
-                        let answer = RTCSessionDescription::answer(sdp)?;
-                        rtc::set_remote_description(&pc, answer).await?;
-                    }
-                    SignalingMessage::IceCandidate { candidate, .. } => {
-                        if let Some((cand, mid, idx)) = decode_ice_candidate(&candidate) {
-                            let init = RTCIceCandidateInit {
-                                candidate: cand,
-                                sdp_mid: mid,
-                                sdp_mline_index: idx,
-                                ..Default::default()
-                            };
-                            let _ = rtc::add_ice_candidate(&pc, init).await;
-                        }
-                    }
-                    SignalingMessage::DownloaderOffline { .. } => {
-                        if peer_matched {
-                            println!("\n\x1b[33m⚠ Receiver disconnected. Waiting for new receiver...\x1b[0m");
-                            peer_matched = false;
-                        }
-                    }
-                    SignalingMessage::Error { message } => {
-                        spinner.finish_and_clear();
-                        return Err(CliError::P2P(message));
-                    }
-                    _ => {}
                 }
+                println!();
+                let mut slot = sslot.lock().unwrap();
+                *slot = Some(create_spinner("Waiting for receiver to connect..."));
             }
-            Some(candidate) = ice_rx.recv() => {
-                let encoded = encode_ice_candidate(
-                    &candidate.candidate,
-                    &candidate.sdp_mid,
-                    &candidate.sdp_mline_index,
+            SenderEvent::ReceiverArrived { device_info } => {
+                if let Some(s) = sslot.lock().unwrap().take() {
+                    s.finish_and_clear();
+                }
+                let info_str = device_info.as_deref().unwrap_or("Unknown device");
+                println!(
+                    "  \x1b[36m→\x1b[0m Receiver arrived ({}), waiting for download to start...",
+                    info_str
                 );
-                sig.send(SignalingMessage::IceCandidate {
-                    share_code: share_code.clone(),
-                    candidate: encoded,
-                    sdp_mid: candidate.sdp_mid,
-                    sdp_m_line_index: candidate.sdp_mline_index,
-                    peer_id: peer_id.clone(),
-                })?;
             }
-            Some(state) = state_rx.recv() => {
-                match state {
-                    RTCIceConnectionState::Connected => {
-                        spinner.finish_and_clear();
-                        rtc::check_relay(&pc).await;
-                        send_files(&dc, &prepared).await?;
-
-                        sig.send(SignalingMessage::TransferComplete {
-                            share_code: share_code.clone(),
-                        })?;
-
-                        transfer_done = true;
-                        break;
-                    }
-                    RTCIceConnectionState::Failed => {
-                        spinner.finish_and_clear();
-                        return Err(CliError::P2P("ICE connection failed".into()));
-                    }
-                    RTCIceConnectionState::Disconnected => {
-                        if !transfer_done {
-                            spinner.finish_and_clear();
-                            println!("\x1b[33m⚠ Connection lost\x1b[0m");
-                            break;
-                        }
-                    }
-                    _ => {}
+            SenderEvent::PeerMatched { device_info } => {
+                if let Some(s) = sslot.lock().unwrap().take() {
+                    s.finish_and_clear();
+                }
+                let info_str = device_info.as_deref().unwrap_or("Unknown device");
+                println!("  \x1b[32m✓\x1b[0m Connected to receiver ({})", info_str);
+                println!();
+            }
+            SenderEvent::FileStart { name, size } => {
+                let mut slot = pslot.lock().unwrap();
+                *slot = Some(create_upload_progress(size, &name));
+            }
+            SenderEvent::Progress { delta } => {
+                if let Some(pb) = pslot.lock().unwrap().as_ref() {
+                    pb.inc(delta);
                 }
             }
-            else => break,
-        }
-    }
-
-    if transfer_done {
-        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-    }
-
-    let _ = pc.close().await;
-    sig.shutdown();
-
-    if transfer_done {
-        println!();
-        println!("\x1b[32m✓ Transfer complete!\x1b[0m");
-        println!();
-    }
-
-    Ok(())
-}
-
-async fn send_files(dc: &Arc<RTCDataChannel>, files: &[PreparedFile]) -> Result<()> {
-    let start = std::time::Instant::now();
-    loop {
-        if dc.ready_state() == webrtc::data_channel::data_channel_state::RTCDataChannelState::Open {
-            break;
-        }
-        if start.elapsed() > std::time::Duration::from_secs(30) {
-            return Err(CliError::P2P("DataChannel open timeout".into()));
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-    }
-
-    for file in files {
-        let metadata = FileMetadata::new(
-            file.name.clone(),
-            file.data.len() as u64,
-            file.content_type.clone(),
-        );
-        let meta_json = serde_json::to_string(&metadata)
-            .map_err(|e| CliError::P2P(format!("Failed to serialize metadata: {}", e)))?;
-        dc.send_text(meta_json).await?;
-
-        let pb = create_upload_progress(file.data.len() as u64, &file.name);
-        let mut offset = 0;
-
-        while offset < file.data.len() {
-            while dc.buffered_amount().await > BUFFERED_AMOUNT_HIGH {
-                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            SenderEvent::FileEnd => {
+                if let Some(pb) = pslot.lock().unwrap().take() {
+                    finish_progress(&pb);
+                }
             }
-
-            let end = std::cmp::min(offset + DC_CHUNK_SIZE, file.data.len());
-            let chunk = &file.data[offset..end];
-            dc.send(&bytes::Bytes::copy_from_slice(chunk)).await?;
-            pb.inc((end - offset) as u64);
-            offset = end;
-        }
-
-        dc.send_text(EOF_SIGNAL.to_string()).await?;
-        finish_progress(&pb);
-    }
-
-    Ok(())
-}
-
-fn prepare_files(
-    files: Vec<PathBuf>,
-    stdin_data: Option<Vec<u8>>,
-    name: Option<String>,
-) -> Result<Vec<PreparedFile>> {
-    let mut prepared = Vec::new();
-
-    if let Some(data) = stdin_data {
-        let file_name = name.unwrap_or_else(|| "stdin.txt".to_string());
-        prepared.push(PreparedFile {
-            name: file_name,
-            data,
-            content_type: "application/octet-stream".to_string(),
-        });
-    } else {
-        for path in &files {
-            if !path.exists() {
-                return Err(CliError::Other(format!("File not found: {}", path.display())));
+            SenderEvent::WaitingForNext => {
+                {
+                    if let Some(s) = sslot.lock().unwrap().take() {
+                        s.finish_and_clear();
+                    }
+                }
+                let mut slot = sslot.lock().unwrap();
+                *slot = Some(create_spinner("Waiting for next request..."));
             }
-            let file_name = path.file_name().unwrap_or_default().to_string_lossy().to_string();
-            let data = std::fs::read(path)?;
-            let content_type = mime_guess::from_path(path).first_or_octet_stream().to_string();
-            prepared.push(PreparedFile { name: file_name, data, content_type });
+            SenderEvent::TransferComplete => {
+                println!();
+                println!("\x1b[32m✓ Transfer complete!\x1b[0m");
+                println!();
+            }
+            SenderEvent::ReceiverDisconnected => {
+                println!("\n\x1b[33m⚠ Receiver disconnected. Waiting for new receiver...\x1b[0m");
+                let mut slot = sslot.lock().unwrap();
+                *slot = Some(create_spinner("Waiting for receiver to connect..."));
+            }
+            SenderEvent::Warning(msg) => {
+                println!("\x1b[33m⚠ {}\x1b[0m", msg);
+            }
+            SenderEvent::RelayDetected => {
+                println!("\x1b[33mℹ TURN server relay in use\x1b[0m");
+            }
+            SenderEvent::Failed(msg) => {
+                println!("\x1b[31m✗ {}\x1b[0m", msg);
+            }
         }
-    }
+    });
 
-    Ok(prepared)
-}
+    let opts = SenderOptions {
+        files,
+        stdin_data,
+        stdin_name: name,
+        password,
+    };
 
-
-fn uuid_simple() -> String {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let t = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    format!("cli-{:x}", t)
+    crate::core::p2p::sender::run(client, opts, on_event).await?;
+    Ok(())
 }

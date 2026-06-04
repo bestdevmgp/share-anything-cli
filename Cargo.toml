@@ -11,7 +11,7 @@ path = "src/main.rs"
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }
-reqwest = { version = "0.12", default-features = false, features = ["multipart", "stream", "json", "rustls-tls"] }
+reqwest = { version = "0.12", default-features = false, features = ["multipart", "stream", "json", "rustls-tls", "http2"] }
 tokio = { version = "1", features = ["full"] }
 indicatif = "0.17"
 serde = { version = "1", features = ["derive"] }
@@ -34,3 +34,12 @@ webrtc = "0.11"
 tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
 url = "2"
 bytes = "1"
+thiserror = "1"
+ratatui = "0.28"
+crossterm = "0.28"
+tui-textarea = "0.6"
+arboard = { version = "3", optional = true, default-features = false }
+
+[features]
+default = ["clipboard"]
+clipboard = ["dep:arboard"]

@@ -54,3 +54,17 @@ impl From<webrtc::Error> for CliError {
 }
 
 pub type Result<T> = std::result::Result<T, CliError>;
+
+impl From<crate::core::error::CoreError> for CliError {
+    fn from(e: crate::core::error::CoreError) -> Self {
+        use crate::core::error::CoreError as C;
+        match e {
+            C::Http(e) => CliError::Http(e),
+            C::Io(e) => CliError::Io(e),
+            C::Api { status, message } => CliError::Api { status, message },
+            C::Unauthenticated => CliError::Other("Personal token required. Use `share login` first".into()),
+            C::P2P(s) => CliError::P2P(s),
+            C::Other(s) => CliError::Other(s),
+        }
+    }
+}

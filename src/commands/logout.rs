@@ -10,6 +10,7 @@ pub fn run() -> Result<()> {
     }
 
     config.token = None;
+    config.user_name = None;
     config
         .save()
         .map_err(|e| CliError::Other(format!("Failed to save config: {}", e)))?;

@@ -1,45 +1,9 @@
 use crate::client::ApiClient;
-use crate::error::{CliError, Result};
-use serde::Deserialize;
-
-#[derive(Debug, Deserialize)]
-struct FileInfoResponse {
-    share_code: String,
-    files: Vec<FileDetail>,
-    has_password: bool,
-    is_one_time: bool,
-    #[serde(default)]
-    transfer_type: Option<String>,
-    expires_at: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct FileDetail {
-    file_name: String,
-    file_size: i64,
-}
+use crate::core::shares::get_share_info;
+use crate::error::Result;
 
 pub async fn run(client: &ApiClient, code: String) -> Result<()> {
-    let resp = client
-        .client
-        .get(client.url(&format!("/cli/download/{}/info", code)))
-        .send()
-        .await?;
-
-    if !resp.status().is_success() {
-        let status = resp.status().as_u16();
-        let body: serde_json::Value = resp.json().await.unwrap_or_default();
-        return Err(CliError::Api {
-            status,
-            message: body["message"]
-                .as_str()
-                .unwrap_or("File not found")
-                .to_string(),
-        });
-    }
-
-    let info: FileInfoResponse = resp.json().await?;
-
+    let info = get_share_info(client, &code).await?;
     println!();
     println!("Share code  : {}", info.share_code);
     if info.transfer_type.as_deref() == Some("p2p") {
@@ -53,7 +17,5 @@ pub async fn run(client: &ApiClient, code: String) -> Result<()> {
         println!("  - {} ({})", f.file_name, crate::format::format_size(f.file_size));
     }
     println!();
-
     Ok(())
 }
-

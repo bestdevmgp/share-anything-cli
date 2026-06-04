@@ -1,24 +1,9 @@
-use crate::client::ApiClient;
 use crate::config::CliConfig;
+use crate::core::auth::{poll_device_status, start_device_session, verify_token};
 use crate::error::{CliError, Result};
 use indicatif::{ProgressBar, ProgressStyle};
-use qrcode::{QrCode, EcLevel};
-use serde::Deserialize;
+use qrcode::{EcLevel, QrCode};
 use std::time::{Duration, Instant};
-
-#[derive(Deserialize)]
-struct SessionResponse {
-    session_id: String,
-    login_url: String,
-    expires_in_seconds: u64,
-}
-
-#[derive(Deserialize)]
-struct StatusResponse {
-    status: String,
-    personal_token: Option<String>,
-    user_name: Option<String>,
-}
 
 pub async fn run(token: Option<String>, config: &CliConfig) -> Result<()> {
     if token.is_none() {
@@ -31,73 +16,45 @@ pub async fn run(token: Option<String>, config: &CliConfig) -> Result<()> {
     }
 
     match token {
-        Some(token) => run_token_login(token).await,
+        Some(token) => run_token_login(token, config).await,
         None => run_device_login(config).await,
     }
 }
 
-async fn run_token_login(token: String) -> Result<()> {
+async fn run_token_login(token: String, _config: &CliConfig) -> Result<()> {
     if !token.starts_with("sat_") {
         return Err(CliError::Other(
             "Invalid token format. Tokens should start with 'sat_'".to_string(),
         ));
     }
 
-    let mut config = CliConfig::load();
-    config.token = Some(token);
-    config
-        .save()
+    let mut cfg = CliConfig::load();
+    cfg.token = Some(token.clone());
+    cfg.save()
         .map_err(|e| CliError::Other(format!("Failed to save config: {}", e)))?;
 
     let config = CliConfig::load();
-    let api_client = ApiClient::new(&config)?;
 
-    let resp = api_client
-        .client
-        .get(api_client.url("/cli/me"))
-        .send()
-        .await?;
-
-    if resp.status().is_success() {
-        let body: serde_json::Value = resp.json().await.unwrap_or_default();
-        let name = body["name"].as_str().unwrap_or("User");
-        let last_used = body["last_used_at"].as_str();
-
-        println!("\x1b[32m✓ Welcome, {}!\x1b[0m", name);
-        if let Some(last) = last_used {
-            println!("  Last sign-in: {}", last);
+    match verify_token(&config, &token).await {
+        Ok(info) => {
+            let mut cfg = CliConfig::load();
+            cfg.user_name = Some(info.name.clone());
+            let _ = cfg.save();
+            println!("\x1b[32m✓ Welcome, {}!\x1b[0m", info.name);
+            if let Some(last) = info.last_used_at {
+                println!("  Last sign-in: {}", last);
+            }
         }
-    } else {
-        println!("\x1b[33m⚠ Token saved, but verification failed. Please check if the token is valid.\x1b[0m");
+        Err(_) => {
+            println!("\x1b[33m⚠ Token saved, but verification failed. Please check if the token is valid.\x1b[0m");
+        }
     }
 
     Ok(())
 }
 
 async fn run_device_login(config: &CliConfig) -> Result<()> {
-    let base_url = config.server_url();
-    let client = reqwest::Client::builder()
-        .user_agent(format!("share-cli/{}", env!("CARGO_PKG_VERSION")))
-        .build()?;
-
-    let resp = client
-        .post(format!("{}/cli/auth/session", base_url))
-        .send()
-        .await?;
-
-    if !resp.status().is_success() {
-        let status = resp.status().as_u16();
-        let body: serde_json::Value = resp.json().await.unwrap_or_default();
-        let message = body["error"]
-            .as_str()
-            .unwrap_or("Failed to create sign-in session")
-            .to_string();
-        return Err(CliError::Api { status, message });
-    }
-
-    let session: SessionResponse = resp.json().await.map_err(|e| {
-        CliError::Other(format!("Failed to parse session response: {}", e))
-    })?;
+    let session = start_device_session(config).await?;
 
     match open::that(&session.login_url) {
         Ok(_) => println!("\x1b[32mBrowser opened. Please complete the sign-in.\x1b[0m"),
@@ -135,26 +92,9 @@ async fn run_device_login(config: &CliConfig) -> Result<()> {
         tokio::time::sleep(Duration::from_secs(2)).await;
         spinner.tick();
 
-        let poll_resp = client
-            .get(format!(
-                "{}/cli/auth/session/{}/status",
-                base_url, session.session_id
-            ))
-            .send()
-            .await;
-
-        let poll_resp = match poll_resp {
-            Ok(r) => r,
-            Err(_) => continue, // Network error, retry
-        };
-
-        if !poll_resp.status().is_success() {
-            continue; // Server error, retry
-        }
-
-        let status: StatusResponse = match poll_resp.json().await {
+        let status = match poll_device_status(config, &session.session_id).await {
             Ok(s) => s,
-            Err(_) => continue,
+            Err(_) => continue, // Network or server error, retry
         };
 
         match status.status.as_str() {
@@ -166,17 +106,14 @@ async fn run_device_login(config: &CliConfig) -> Result<()> {
                     CliError::Other("Server did not return a token".to_string())
                 })?;
 
-                let mut config = CliConfig::load();
-                config.token = Some(personal_token);
-                config
-                    .save()
+                let mut cfg = CliConfig::load();
+                cfg.token = Some(personal_token);
+                cfg.user_name = status.user_name.clone();
+                cfg.save()
                     .map_err(|e| CliError::Other(format!("Failed to save config: {}", e)))?;
 
                 let user_name = status.user_name.as_deref().unwrap_or("User");
-                println!(
-                    "\x1b[32m✓ Signed in! Welcome, {}\x1b[0m",
-                    user_name
-                );
+                println!("\x1b[32m✓ Signed in! Welcome, {}\x1b[0m", user_name);
                 return Ok(());
             }
             "expired" => {

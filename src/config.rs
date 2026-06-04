@@ -1,10 +1,11 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-#[derive(Debug, Serialize, Deserialize, Default)]
+#[derive(Clone, Serialize, Deserialize, Default)]
 pub struct CliConfig {
     pub token: Option<String>,
     pub server_url: Option<String>,
+    pub user_name: Option<String>,
 }
 
 impl CliConfig {

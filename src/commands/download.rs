@@ -1,25 +1,11 @@
 use crate::client::ApiClient;
+use crate::core::download::{download_share, DownloadOptions};
+use crate::core::shares::get_share_info;
+use crate::core::ProgressFn;
 use crate::error::{CliError, Result};
 use crate::progress::create_download_progress;
-use futures_util::StreamExt;
-use serde::Deserialize;
 use std::path::PathBuf;
-
-#[allow(dead_code)]
-#[derive(Debug, Deserialize)]
-struct FileInfoResponse {
-    share_code: String,
-    files: Vec<FileDetail>,
-    has_password: bool,
-    #[serde(default)]
-    transfer_type: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct FileDetail {
-    file_name: String,
-    file_size: i64,
-}
+use std::sync::Arc;
 
 pub async fn run(
     client: &ApiClient,
@@ -28,29 +14,7 @@ pub async fn run(
     output: Option<PathBuf>,
     file_id: Option<String>,
 ) -> Result<()> {
-    let info_resp = client
-        .client
-        .get(client.url(&format!("/cli/download/{}/info", code)))
-        .send()
-        .await?;
-
-    if !info_resp.status().is_success() {
-        let status = info_resp.status().as_u16();
-        let body: serde_json::Value = info_resp.json().await.unwrap_or_default();
-        return Err(CliError::Api {
-            status,
-            message: body["message"]
-                .as_str()
-                .unwrap_or("File not found")
-                .to_string(), // /cli/download/{code}/info uses old envelope
-        });
-    }
-
-    let info: FileInfoResponse = info_resp.json().await?;
-
-    if info.transfer_type.as_deref() == Some("p2p") {
-        return crate::p2p::receiver::run(client, code, output).await;
-    }
+    let info = get_share_info(client, &code).await?;
 
     if info.has_password && password.is_none() {
         return Err(CliError::Other(
@@ -58,121 +22,38 @@ pub async fn run(
         ));
     }
 
-    let mut url = client.url(&format!("/cli/shares/{}/download", code));
-    let mut params = Vec::new();
-    if let Some(ref pw) = password {
-        params.push(format!("password={}", pw));
-    }
-    if let Some(ref fid) = file_id {
-        params.push(format!("file_id={}", fid));
-    }
-    if !params.is_empty() {
-        url = format!("{}?{}", url, params.join("&"));
+    if info.transfer_type.as_deref() == Some("p2p") {
+        return crate::p2p::receiver::run(client, code, password, output).await;
     }
 
-    let resp = client.client.get(&url).send().await?;
+    let target_total = if !info.files.is_empty() { info.files[0].file_size as u64 } else { 0 };
+    let target_name = if !info.files.is_empty() { info.files[0].file_name.clone() } else { format!("download_{}", code) };
 
-    if !resp.status().is_success() {
-        let status = resp.status().as_u16();
-        let body: serde_json::Value = resp.json().await.unwrap_or_default();
-        return Err(CliError::Api {
-            status,
-            message: body["error"]["message"]
-                .as_str()
-                .or_else(|| body["message"].as_str())
-                .unwrap_or("Download failed")
-                .to_string(),
-        });
-    }
+    let pb = create_download_progress(target_total, &target_name);
+    let pb_cb = pb.clone();
+    let on_progress: ProgressFn = Arc::new(move |n: u64| pb_cb.inc(n));
 
-    let file_name = resp
-        .headers()
-        .get("content-disposition")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| {
-            // Try filename*=UTF-8''... first
-            if let Some(start) = v.find("filename*=UTF-8''") {
-                let encoded = &v[start + 17..];
-                let encoded = encoded.split(';').next().unwrap_or(encoded).trim();
-                percent_decode(encoded)
-            } else if let Some(start) = v.find("filename=") {
-                let name = &v[start + 9..];
-                let name = name.split(';').next().unwrap_or(name).trim();
-                Some(name.trim_matches('"').to_string())
-            } else {
-                None
-            }
-        })
-        .unwrap_or_else(|| {
-            if !info.files.is_empty() {
-                info.files[0].file_name.clone()
-            } else {
-                format!("download_{}", code)
-            }
-        });
-
-    let content_length = resp.content_length().unwrap_or(0);
-    let target_file = if !info.files.is_empty() {
-        info.files[0].file_size as u64
-    } else {
-        content_length
-    };
-
-    let pb = create_download_progress(target_file, &file_name);
-
-    let output_path = if let Some(dir) = output {
-        if dir.is_dir() {
-            dir.join(&file_name)
-        } else {
-            dir
-        }
-    } else {
-        PathBuf::from(&file_name)
-    };
-
-    let mut file = tokio::fs::File::create(&output_path).await?;
-    let mut stream = resp.bytes_stream();
-
-    use tokio::io::AsyncWriteExt;
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(CliError::Http)?;
-        file.write_all(&chunk).await?;
-        pb.inc(chunk.len() as u64);
-    }
-
-    file.flush().await?;
+    let output_dir = output.unwrap_or_else(|| PathBuf::from("."));
+    let result = download_share(
+        client,
+        &code,
+        &info,
+        DownloadOptions { password, file_id },
+        &output_dir,
+        on_progress,
+    )
+    .await;
     pb.finish_and_clear();
+    let saved = result?;
 
     println!();
     println!("\x1b[32m✓ Download complete!\x1b[0m");
-    let display_path = if output_path.is_relative() && !output_path.starts_with(".") {
-        format!("./{}", output_path.display())
+    let display_path = if saved.is_relative() && !saved.starts_with(".") {
+        format!("./{}", saved.display())
     } else {
-        output_path.display().to_string()
+        saved.display().to_string()
     };
     println!("  Saved to: {}", display_path);
     println!();
-
     Ok(())
-}
-
-fn percent_decode(input: &str) -> Option<String> {
-    let mut result = Vec::new();
-    let bytes = input.as_bytes();
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'%' && i + 2 < bytes.len() {
-            if let Ok(byte) = u8::from_str_radix(
-                std::str::from_utf8(&bytes[i + 1..i + 3]).unwrap_or(""),
-                16,
-            ) {
-                result.push(byte);
-                i += 3;
-                continue;
-            }
-        }
-        result.push(bytes[i]);
-        i += 1;
-    }
-    String::from_utf8(result).ok()
 }

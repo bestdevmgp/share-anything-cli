@@ -1,10 +1,12 @@
 mod client;
 mod commands;
 mod config;
+mod core;
 mod error;
 pub mod format;
 mod p2p;
 mod progress;
+mod tui;
 pub mod time;
 
 use clap::{Parser, Subcommand};
@@ -21,13 +23,13 @@ use std::path::PathBuf;
   share upload file.txt              Upload a file
   share upload a.txt b.txt           Upload multiple files
   echo 'hi' | share upload -n hi.txt Pipe stdin
-  share download ABC123              Download by share code
-  share info ABC123                  Check file info
+  share download 123456              Download by share code
+  share info 123456                  Check file info
   share login sat_your_token_here     Save personal token
   share history                      View upload history
   share download-history             View download history
-  share delete ABC123                Delete a share by code
-  share logs ABC123                  View download logs for a share"
+  share delete 123456                Delete a share by code
+  share logs 123456                  View download logs for a share"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -117,12 +119,10 @@ enum Commands {
     Logout,
 }
 
-#[tokio::main]
-async fn main() {
-    let cli = Cli::parse();
+async fn run_cli(cli: Cli) -> Result<(), crate::error::CliError> {
     let cfg = config::CliConfig::load();
 
-    let result = match cli.command {
+    match cli.command {
         Commands::Upload {
             files,
             password,
@@ -131,13 +131,7 @@ async fn main() {
             name,
             secure,
         } => {
-            let api_client = match client::ApiClient::new(&cfg) {
-                Ok(c) => c,
-                Err(e) => {
-                    eprintln!("\x1b[31mError: {}\x1b[0m", e);
-                    std::process::exit(1);
-                }
-            };
+            let api_client = client::ApiClient::new(&cfg)?;
 
             let stdin_data = if files.is_empty() && atty::isnt(atty::Stream::Stdin) {
                 use std::io::Read;
@@ -172,77 +166,74 @@ async fn main() {
             output,
             file_id,
         } => {
-            let api_client = match client::ApiClient::new(&cfg) {
-                Ok(c) => c,
-                Err(e) => {
-                    eprintln!("\x1b[31mError: {}\x1b[0m", e);
-                    std::process::exit(1);
-                }
-            };
+            let api_client = client::ApiClient::new(&cfg)?;
             commands::download::run(&api_client, code, password, output, file_id).await
         }
 
         Commands::Info { code } => {
-            let api_client = match client::ApiClient::new(&cfg) {
-                Ok(c) => c,
-                Err(e) => {
-                    eprintln!("\x1b[31mError: {}\x1b[0m", e);
-                    std::process::exit(1);
-                }
-            };
+            let api_client = client::ApiClient::new(&cfg)?;
             commands::info::run(&api_client, code).await
         }
 
         Commands::History => {
-            let api_client = match client::ApiClient::new(&cfg) {
-                Ok(c) => c,
-                Err(e) => {
-                    eprintln!("\x1b[31mError: {}\x1b[0m", e);
-                    std::process::exit(1);
-                }
-            };
+            let api_client = client::ApiClient::new(&cfg)?;
             commands::list::run(&api_client).await
         }
 
         Commands::DownloadHistory => {
-            let api_client = match client::ApiClient::new(&cfg) {
-                Ok(c) => c,
-                Err(e) => {
-                    eprintln!("\x1b[31mError: {}\x1b[0m", e);
-                    std::process::exit(1);
-                }
-            };
+            let api_client = client::ApiClient::new(&cfg)?;
             commands::download_history::run(&api_client).await
         }
 
         Commands::Delete { code } => {
-            let api_client = match client::ApiClient::new(&cfg) {
-                Ok(c) => c,
-                Err(e) => {
-                    eprintln!("\x1b[31mError: {}\x1b[0m", e);
-                    std::process::exit(1);
-                }
-            };
+            let api_client = client::ApiClient::new(&cfg)?;
             commands::delete::run(&api_client, code).await
         }
 
         Commands::Logs { code } => {
-            let api_client = match client::ApiClient::new(&cfg) {
-                Ok(c) => c,
-                Err(e) => {
-                    eprintln!("\x1b[31mError: {}\x1b[0m", e);
-                    std::process::exit(1);
-                }
-            };
+            let api_client = client::ApiClient::new(&cfg)?;
             commands::logs::run(&api_client, code).await
         }
 
         Commands::Login { token } => commands::login::run(token, &cfg).await,
 
         Commands::Logout => commands::logout::run(),
-    };
+    }
+}
 
-    if let Err(e) = result {
+#[tokio::main]
+async fn main() {
+    let raw_args: Vec<String> = std::env::args().skip(1).collect();
+    if raw_args.is_empty() {
+        let stdin_tty = atty::is(atty::Stream::Stdin);
+        let stdout_tty = atty::is(atty::Stream::Stdout);
+
+        if stdin_tty && stdout_tty {
+            let cfg = config::CliConfig::load();
+            if let Err(e) = tui::run(cfg).await {
+                eprintln!("\x1b[31mError: {}\x1b[0m", e);
+                std::process::exit(1);
+            }
+            return;
+        }
+
+        if !stdin_tty {
+            // echo hi | share → fall back to `share upload` stdin behavior.
+            let cli = Cli::parse_from(["share", "upload"]);
+            if let Err(e) = run_cli(cli).await {
+                eprintln!("\x1b[31mError: {}\x1b[0m", e);
+                std::process::exit(1);
+            }
+            return;
+        }
+
+        eprintln!("share: cannot launch TUI (stdout is not a TTY).");
+        eprintln!("Run `share --help` for available commands.");
+        std::process::exit(1);
+    }
+
+    let cli = Cli::parse();
+    if let Err(e) = run_cli(cli).await {
         eprintln!("\x1b[31mError: {}\x1b[0m", e);
         std::process::exit(1);
     }

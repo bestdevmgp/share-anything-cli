@@ -3,14 +3,11 @@ use crate::error::{CliError, Result};
 use serde::Deserialize;
 use std::sync::Arc;
 use tokio::sync::mpsc;
-use webrtc::api::interceptor_registry::register_default_interceptors;
-use webrtc::api::media_engine::MediaEngine;
 use webrtc::api::APIBuilder;
 use webrtc::data_channel::RTCDataChannel;
 use webrtc::ice_transport::ice_candidate::RTCIceCandidateInit;
 use webrtc::ice_transport::ice_connection_state::RTCIceConnectionState;
 use webrtc::ice_transport::ice_server::RTCIceServer;
-use webrtc::interceptor::registry::Registry;
 use webrtc::peer_connection::configuration::RTCConfiguration;
 use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
 use webrtc::peer_connection::RTCPeerConnection;
@@ -79,16 +76,8 @@ pub async fn fetch_ice_servers(client: &ApiClient) -> Result<Vec<RTCIceServer>> 
 pub async fn create_peer_connection(
     ice_servers: Vec<RTCIceServer>,
 ) -> Result<Arc<RTCPeerConnection>> {
-    let mut media_engine = MediaEngine::default();
-    media_engine.register_default_codecs()?;
-
-    let mut registry = Registry::new();
-    registry = register_default_interceptors(registry, &mut media_engine)?;
-
-    let api = APIBuilder::new()
-        .with_media_engine(media_engine)
-        .with_interceptor_registry(registry)
-        .build();
+    // DataChannel-only: no audio/video codecs or interceptors needed.
+    let api = APIBuilder::new().build();
 
     let config = RTCConfiguration {
         ice_servers,
@@ -161,14 +150,17 @@ pub async fn add_ice_candidate(pc: &Arc<RTCPeerConnection>, candidate: RTCIceCan
     Ok(())
 }
 
-pub async fn check_relay(pc: &Arc<RTCPeerConnection>) {
+/// Returns true when at least one ICE candidate is a TURN relay, so UI layers can surface
+/// "TURN relay in use" out-of-band rather than writing to stdout (which would corrupt the
+/// TUI alternate screen).
+pub async fn check_relay(pc: &Arc<RTCPeerConnection>) -> bool {
     let stats = pc.get_stats().await;
     for (_, stat) in stats.reports.iter() {
         if let webrtc::stats::StatsReportType::LocalCandidate(local) = stat {
             if local.candidate_type == webrtc::ice::candidate::CandidateType::Relay {
-                println!("  \x1b[33mℹ\x1b[0m TURN server relay in use");
-                return;
+                return true;
             }
         }
     }
+    false
 }

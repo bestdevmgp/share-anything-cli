@@ -13,10 +13,6 @@ pub fn create_upload_progress(total_size: u64, file_name: &str) -> ProgressBar {
     pb
 }
 
-pub fn update_progress(pb: &ProgressBar, n: u64) {
-    pb.inc(n);
-}
-
 pub fn finish_progress(pb: &ProgressBar) {
     pb.finish_and_clear();
 }

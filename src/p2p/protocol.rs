@@ -1,7 +1,11 @@
 use serde::{Deserialize, Serialize};
 
 pub const DC_CHUNK_SIZE: usize = 65536;
-pub const BUFFERED_AMOUNT_HIGH: usize = 1_048_576;
+// Sized for the BDP (bandwidth-delay product) of a TURN-relayed transfer where
+// RTT can reach 200-300 ms. With 1 MB buffer throughput plateaus at ~5 MB/s;
+// 4 MB allows the SCTP send window to stay full and reach ~20 MB/s while
+// keeping memory pressure trivial on direct (low-RTT) paths.
+pub const BUFFERED_AMOUNT_HIGH: usize = 4 * 1024 * 1024;
 pub const EOF_SIGNAL: &str = "__EOF__";
 pub const WS_PING_INTERVAL_SECS: u64 = 30;
 
@@ -21,6 +25,8 @@ pub enum SignalingMessage {
         file_name: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         device_info: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        password: Option<String>,
     },
     PeerMatched {
         peer_id: String,
