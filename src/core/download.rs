@@ -125,7 +125,7 @@ struct BulkDownloadRequest<'a> {
 }
 
 /// Stream every file in the share into a single store-only ZIP saved next to `output_dir`.
-/// The save name is `{code}.zip`. Returns the saved path.
+/// The save name is `share-{code}.zip`. Returns the saved path.
 ///
 /// Uses the public `/download/bulk` endpoint (no `/cli/` prefix). That endpoint accepts an
 /// explicit `file_ids` list — we pass all of them.
@@ -149,7 +149,7 @@ pub async fn download_bulk_zip(
     }
 
     let output_path = if output_dir.is_dir() {
-        output_dir.join(format!("{}.zip", code))
+        output_dir.join(format!("share-{}.zip", code))
     } else {
         output_dir.to_path_buf()
     };

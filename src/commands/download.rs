@@ -34,7 +34,7 @@ pub async fn run(
 
     if multi && zip {
         let total: u64 = info.files.iter().map(|f| f.file_size.max(0) as u64).sum();
-        let pb = create_download_progress(total, &format!("{}.zip", code));
+        let pb = create_download_progress(total, &format!("share-{}.zip", code));
         let pb_cb = pb.clone();
         let on_progress: ProgressFn = Arc::new(move |n: u64| pb_cb.inc(n));
         let file_ids: Vec<String> = info.files.iter().map(|f| f.id.clone()).collect();

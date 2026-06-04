@@ -616,7 +616,7 @@ fn start_zip(
     // ZIP content-length is unknown ahead of time — use sum of file sizes as a rough cap so
     // the gauge has a sensible denominator. (Real ZIP slightly differs by header overhead.)
     let target_total: u64 = info.files.iter().map(|f| f.file_size.max(0) as u64).sum();
-    let target_display = format!("{}.zip", code);
+    let target_display = format!("share-{}.zip", code);
     let file_ids: Vec<String> = info.files.iter().map(|f| f.id.clone()).collect();
 
     let client = ctx.client.clone();
