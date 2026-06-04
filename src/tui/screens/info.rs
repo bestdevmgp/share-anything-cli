@@ -77,6 +77,15 @@ pub fn update(s: &mut State, ev: &Event, ctx: &mut AppCtx) -> ScreenAction {
         Phase::Loaded(info) => {
             let Event::Key(k) = ev else { return ScreenAction::Stay; };
             match k.code {
+                KeyCode::Char('c') => {
+                    let ok = crate::tui::copy_to_clipboard(&info.share_code);
+                    *ctx.toast = Some(if ok {
+                        crate::tui::widgets::toast::Toast::success("Share code copied to clipboard.")
+                    } else {
+                        crate::tui::widgets::toast::Toast::warn("Clipboard unavailable - code is shown above.")
+                    });
+                    ScreenAction::Stay
+                }
                 KeyCode::Char('d') => ScreenAction::PushDownloadForCode(info.share_code.clone()),
                 KeyCode::Enter | KeyCode::Esc | KeyCode::Char('q')
                     | KeyCode::Left | KeyCode::Char('b') => ScreenAction::Pop,
@@ -111,81 +120,216 @@ pub fn render(s: &State, f: &mut Frame) {
     );
 
     match &s.phase {
-        Phase::InputCode { code } => {
-            let body = chunks[1];
-            let input_width = std::cmp::min(body.width, 28);
-            let input_height: u16 = 3;
-            let x = body.x + body.width.saturating_sub(input_width) / 2;
-            let y = body.y + 2;
-            let input_area = ratatui::layout::Rect { x, y, width: input_width, height: input_height };
-            let above = ratatui::layout::Rect { x: body.x, y: body.y, width: body.width, height: 2 };
-            f.render_widget(
-                Paragraph::new(" Enter a share code:")
-                    .style(Style::default().fg(Color::DarkGray)),
-                above,
-            );
-            f.render_widget(code, input_area);
-        }
-        Phase::Loading { code } => {
-            f.render_widget(Paragraph::new(format!(" Loading {}…", code)), chunks[1]);
-        }
-        Phase::Loaded(info) => render_info(f, chunks[1], info),
-        Phase::Failed(msg) => f.render_widget(
-            Paragraph::new(format!(" {}", msg)).style(Style::default().fg(Color::Red)),
-            chunks[1],
-        ),
+        Phase::InputCode { code } => render_input_code(f, chunks[1], code),
+        Phase::Loading { code } => render_loading(f, chunks[1], code),
+        Phase::Loaded(info) => render_loaded(f, chunks[1], info),
+        Phase::Failed(msg) => render_failed(f, chunks[1], msg),
     }
 
     let hint_text = match &s.phase {
-        Phase::Loaded(_) => " [d] download  [Enter/b/\u{2190}] back  [Esc] back ",
-        _ => " [Enter/b/\u{2190}] back  [Esc] back ",
+        Phase::Loaded(info) => {
+            if info.has_password {
+                " [d] download with password    [c] copy code    [Enter/Esc/q/b/\u{2190}] back "
+            } else {
+                " [d] download    [c] copy code    [Enter/Esc/q/b/\u{2190}] back "
+            }
+        }
+        Phase::InputCode { .. } => " [Enter] look up    [Esc] back ",
+        _ => " [Esc] back ",
     };
     f.render_widget(
-        Paragraph::new(hint_text)
-            .style(Style::default().fg(Color::DarkGray)),
+        Paragraph::new(hint_text).style(Style::default().fg(Color::DarkGray)),
         chunks[2],
     );
 }
 
-fn render_info(f: &mut Frame, area: Rect, info: &FileInfo) {
-    let mut lines: Vec<Line> = vec![
-        Line::from(format!(" Share code : {}", info.share_code)),
-    ];
-    if info.transfer_type.as_deref() == Some("p2p") {
-        lines.push(Line::from(" Transfer   : Secure (P2P)"));
-    }
-    lines.push(Line::from(format!(
-        " Password   : {}",
-        if info.has_password { "Yes" } else { "No" }
-    )));
-    lines.push(Line::from(format!(
-        " One-time   : {}",
-        if info.is_one_time { "Yes" } else { "No" }
-    )));
-    lines.push(Line::from(format!(
-        " Expires at : {}",
-        crate::time::utc_to_local(&info.expires_at)
-    )));
+fn render_input_code(f: &mut Frame, area: Rect, code: &TextArea) {
+    let input_width = std::cmp::min(area.width, 28);
+    let input_height: u16 = 3;
+    let x = area.x + area.width.saturating_sub(input_width) / 2;
+    let y = area.y + 2;
+    let input_area = Rect { x, y, width: input_width, height: input_height };
+    let above = Rect { x: area.x, y: area.y, width: area.width, height: 2 };
+    f.render_widget(
+        Paragraph::new(" Enter a share code:")
+            .style(Style::default().fg(Color::DarkGray)),
+        above,
+    );
+    f.render_widget(code, input_area);
+}
 
-    if info.has_password {
-        lines.push(Line::from(""));
-        lines.push(Line::from(Span::styled(
-            " \u{1f512} This share is password-protected.",
-            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
-        )));
-        lines.push(Line::from(Span::styled(
-            "    File details are hidden. Press [d] to download with the password.",
-            Style::default().fg(Color::DarkGray),
-        )));
-    } else {
-        lines.push(Line::from(format!(" Files ({}):", info.files.len())));
-        for fd in &info.files {
-            lines.push(Line::from(format!(
-                "   - {} ({})",
-                fd.file_name,
-                crate::format::format_size(fd.file_size)
-            )));
+fn render_loading(f: &mut Frame, area: Rect, code: &str) {
+    let inner = super::download::card(f, area, "Share info", Color::Cyan);
+    let chunks = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Min(0),
+    ])
+    .split(inner);
+    f.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled(" Looking up ", Style::default().fg(Color::DarkGray)),
+            Span::styled(code.to_string(), Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+            Span::styled("\u{2026}", Style::default().fg(Color::DarkGray)),
+        ])),
+        chunks[1],
+    );
+}
+
+fn render_failed(f: &mut Frame, area: Rect, msg: &str) {
+    let inner = super::download::card(f, area, "Share info", Color::Red);
+    let chunks = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Min(0),
+    ])
+    .split(inner);
+    f.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled(
+                " \u{2717}  ",
+                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(msg.to_string(), Style::default().fg(Color::Red)),
+        ])),
+        chunks[1],
+    );
+}
+
+fn render_loaded(f: &mut Frame, area: Rect, info: &FileInfo) {
+    let inner = super::download::card(f, area, "Share info", Color::Cyan);
+
+    let total_bytes: i64 = info.files.iter().map(|f| f.file_size).sum();
+    let total_str = crate::format::format_size(total_bytes);
+
+    let body_lines_for_protected: u16 = if info.has_password { 5 } else { 0 };
+    let files_count = info.files.len() as u16;
+    // For unprotected shares we want header + N file rows, but cap so the section can't
+    // exceed the available card height — render code below collapses overflow to a "…" row.
+    let fixed_h: u16 = 1 + 1 + 1 + body_lines_for_protected; // chunks 0,1,2,4
+    let want_files_h = if info.has_password { 0 } else { 1 + files_count + 1 };
+    let max_files_h = inner.height.saturating_sub(fixed_h);
+    let files_h = want_files_h.min(max_files_h);
+
+    let chunks = Layout::vertical([
+        Constraint::Length(1),                                    // top padding
+        Constraint::Length(1),                                    // info bar (chips)
+        Constraint::Length(1),                                    // spacer
+        Constraint::Length(files_h),                              // files section (if any)
+        Constraint::Length(body_lines_for_protected),             // password notice (if any)
+        Constraint::Min(0),                                       // remaining
+    ])
+    .split(inner);
+
+    super::download::render_info_bar(f, chunks[1], info);
+
+    if !info.has_password {
+        let header = Line::from(vec![
+            Span::styled(
+                format!(" Files ({})", info.files.len()),
+                Style::default().fg(Color::DarkGray).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!(" \u{00b7} {} total", total_str),
+                Style::default().fg(Color::DarkGray),
+            ),
+        ]);
+
+        let area = chunks[3];
+        let cap = area.height as usize;
+        if cap > 0 {
+            let name_col = area.width.saturating_sub(20).max(8);
+            let visible_rows = cap.saturating_sub(1);
+            let total = info.files.len();
+            let need_overflow = total > visible_rows;
+            let shown = if need_overflow { visible_rows.saturating_sub(1) } else { total };
+
+            let mut lines: Vec<Line> = Vec::with_capacity(cap);
+            lines.push(header);
+            for fd in info.files.iter().take(shown) {
+                let size = crate::format::format_size(fd.file_size);
+                let name = truncate_middle(&fd.file_name, name_col as usize);
+                let pad = (name_col as usize).saturating_sub(visible_width(&name));
+                lines.push(Line::from(vec![
+                    Span::styled(" \u{2022} ", Style::default().fg(Color::Cyan)),
+                    Span::raw(name),
+                    Span::raw(" ".repeat(pad + 2)),
+                    Span::styled(size, Style::default().fg(Color::DarkGray)),
+                ]));
+            }
+            if need_overflow {
+                lines.push(Line::from(Span::styled(
+                    "   \u{2026}",
+                    Style::default().fg(Color::DarkGray),
+                )));
+            }
+            f.render_widget(Paragraph::new(lines), area);
         }
+    } else {
+        let notice = vec![
+            Line::from(""),
+            Line::from(vec![
+                Span::styled(
+                    " \u{1f512} ",
+                    Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    "Password-protected",
+                    Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+                ),
+            ]),
+            Line::from(Span::styled(
+                "    File details are hidden until the correct password is entered.",
+                Style::default().fg(Color::DarkGray),
+            )),
+            Line::from(Span::styled(
+                "    Press [d] to start the download and enter the password.",
+                Style::default().fg(Color::DarkGray),
+            )),
+        ];
+        f.render_widget(Paragraph::new(notice), chunks[4]);
     }
-    f.render_widget(Paragraph::new(lines), area);
+}
+
+fn visible_width(s: &str) -> usize {
+    // Use terminal display width — CJK characters (Korean / Japanese / Chinese / emoji) take
+    // 2 cells each, while ASCII takes 1. Counting `chars()` instead would treat "한글" as
+    // width 2 even though it actually occupies 4 cells, leaving the size column too short
+    // and pushing the bytes off-screen.
+    use unicode_width::UnicodeWidthStr;
+    UnicodeWidthStr::width(s)
+}
+
+fn truncate_middle(s: &str, max: usize) -> String {
+    use unicode_width::UnicodeWidthChar;
+    let total = visible_width(s);
+    if total <= max || max < 3 {
+        return s.to_string();
+    }
+    // Reserve one cell for the "…" ellipsis. Walk from each end accumulating display width
+    // until both halves combined would exceed the budget.
+    let keep = max - 1;
+    let head_budget = keep / 2;
+    let tail_budget = keep - head_budget;
+
+    let chars: Vec<char> = s.chars().collect();
+    let mut head = String::new();
+    let mut head_w = 0;
+    for ch in &chars {
+        let w = UnicodeWidthChar::width(*ch).unwrap_or(0);
+        if head_w + w > head_budget { break; }
+        head.push(*ch);
+        head_w += w;
+    }
+    let mut tail_buf: Vec<char> = Vec::new();
+    let mut tail_w = 0;
+    for ch in chars.iter().rev() {
+        let w = UnicodeWidthChar::width(*ch).unwrap_or(0);
+        if tail_w + w > tail_budget { break; }
+        tail_buf.push(*ch);
+        tail_w += w;
+    }
+    let tail: String = tail_buf.into_iter().rev().collect();
+
+    format!("{}\u{2026}{}", head, tail)
 }

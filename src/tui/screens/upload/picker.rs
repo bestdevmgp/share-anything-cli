@@ -186,14 +186,6 @@ impl State {
 
 fn read_dir(p: &Path) -> std::io::Result<Vec<Entry>> {
     let mut out: Vec<Entry> = Vec::new();
-    if p.parent().is_some() {
-        out.push(Entry {
-            name: "..".into(),
-            path: p.join(".."),
-            is_dir: true,
-            size: 0,
-        });
-    }
     for it in std::fs::read_dir(p)? {
         let it = it?;
         let Ok(md) = it.metadata() else { continue };
@@ -206,30 +198,13 @@ fn read_dir(p: &Path) -> std::io::Result<Vec<Entry>> {
             size: md.len(),
         });
     }
-    out.sort_by(|a, b| {
-        let a_dotdot = a.name == "..";
-        let b_dotdot = b.name == "..";
-        if a_dotdot && !b_dotdot { return std::cmp::Ordering::Less; }
-        if !a_dotdot && b_dotdot { return std::cmp::Ordering::Greater; }
-        b.is_dir.cmp(&a.is_dir).then(a.name.cmp(&b.name))
-    });
+    out.sort_by(|a, b| b.is_dir.cmp(&a.is_dir).then(a.name.cmp(&b.name)));
     Ok(out)
 }
 
-/// Returns the absolute path of the cursor row. `".."` resolves to the parent dir.
 fn cursor_absolute_path(s: &State, rows: &[Row]) -> String {
     match rows.get(s.cursor) {
-        Some(Row::Entry { idx }) => {
-            let e = &s.entries[*idx];
-            if e.name == ".." {
-                s.cwd
-                    .parent()
-                    .map(|p| p.display().to_string())
-                    .unwrap_or_else(|| s.cwd.display().to_string())
-            } else {
-                e.path.display().to_string()
-            }
-        }
+        Some(Row::Entry { idx }) => s.entries[*idx].path.display().to_string(),
         Some(Row::Selected { path }) => path.display().to_string(),
         _ => String::new(),
     }
@@ -487,16 +462,26 @@ pub fn render(s: &State, f: &mut Frame) {
     ])
     .split(files_inner);
 
-    let entry_items: Vec<ListItem> = s.entries.iter().map(|e| {
-        ListItem::new(render_entry_line(e, s.selected.contains_key(&e.path), false))
-    }).collect();
-    let files_list = List::new(entry_items)
-        .highlight_style(Style::default().add_modifier(Modifier::REVERSED));
-    let mut entry_state = ListState::default();
-    if s.cursor < s.entries.len() {
-        entry_state.select(Some(s.cursor));
+    if s.entries.is_empty() {
+        f.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                "  (empty folder)",
+                Style::default().fg(Color::DarkGray),
+            ))),
+            files_inner_chunks[0],
+        );
+    } else {
+        let entry_items: Vec<ListItem> = s.entries.iter().map(|e| {
+            ListItem::new(render_entry_line(e, s.selected.contains_key(&e.path), false))
+        }).collect();
+        let files_list = List::new(entry_items)
+            .highlight_style(Style::default().add_modifier(Modifier::REVERSED));
+        let mut entry_state = ListState::default();
+        if s.cursor < s.entries.len() {
+            entry_state.select(Some(s.cursor));
+        }
+        f.render_stateful_widget(files_list, files_inner_chunks[0], &mut entry_state);
     }
-    f.render_stateful_widget(files_list, files_inner_chunks[0], &mut entry_state);
 
     if cursor_bar_h > 0 {
         let sep_w = files_inner.width as usize;
@@ -549,8 +534,8 @@ pub fn render(s: &State, f: &mut Frame) {
         crate::format::format_size_u64(total)
     );
     let hints = match s.mode {
-        PickerMode::Upload => " [space/enter]toggle  [enter]open  [r]range  [←/→]dir  [u]upload  [q/b]cancel ",
-        PickerMode::Secure => " [space/enter]toggle  [enter]open  [r]range  [←/→]dir  [u]confirm  [q/b]cancel ",
+        PickerMode::Upload => " [↑↓]move  [space/enter]toggle  [enter]open  [r]range  [←/→]dir  [u]upload  [q/b]cancel ",
+        PickerMode::Secure => " [↑↓]move  [space/enter]toggle  [enter]open  [r]range  [←/→]dir  [u]confirm  [q/b]cancel ",
     };
     let body = Paragraph::new(vec![
         Line::from(Span::styled(summary, Style::default().add_modifier(Modifier::BOLD))),

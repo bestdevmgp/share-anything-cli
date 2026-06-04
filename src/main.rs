@@ -79,6 +79,11 @@ enum Commands {
         /// Specific file ID to download
         #[arg(long)]
         file_id: Option<String>,
+
+        /// For multi-file shares: bundle every file into a single ZIP archive named
+        /// {code}.zip instead of saving each file individually.
+        #[arg(long)]
+        zip: bool,
     },
 
     /// Show file info before downloading
@@ -165,9 +170,10 @@ async fn run_cli(cli: Cli) -> Result<(), crate::error::CliError> {
             password,
             output,
             file_id,
+            zip,
         } => {
             let api_client = client::ApiClient::new(&cfg)?;
-            commands::download::run(&api_client, code, password, output, file_id).await
+            commands::download::run(&api_client, code, password, output, file_id, zip).await
         }
 
         Commands::Info { code } => {

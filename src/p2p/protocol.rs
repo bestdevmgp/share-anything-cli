@@ -1,6 +1,11 @@
 use serde::{Deserialize, Serialize};
 
-pub const DC_CHUNK_SIZE: usize = 65536;
+// Cap at 16 KiB to stay below webrtc-rs's read_loop buffer (u16::MAX = 65535).
+// Any chunk larger than that buffer surfaces as ErrShortBuffer in the SCTP layer and
+// silently kills the receiver's read loop — the channel "connects" but never delivers
+// any messages, which manifested as the receiver stuck at 0% while the sender showed
+// progress. 16 KiB is also the RFC 8831 minimum every WebRTC implementation must accept.
+pub const DC_CHUNK_SIZE: usize = 16 * 1024;
 // Sized for the BDP (bandwidth-delay product) of a TURN-relayed transfer where
 // RTT can reach 200-300 ms. With 1 MB buffer throughput plateaus at ~5 MB/s;
 // 4 MB allows the SCTP send window to stay full and reach ~20 MB/s while

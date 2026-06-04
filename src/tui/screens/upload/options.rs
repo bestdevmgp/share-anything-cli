@@ -85,6 +85,27 @@ pub fn update(s: &mut State, ev: &Event, ctx: &mut AppCtx) -> ScreenAction {
             if matches!(k.code, KeyCode::Esc) {
                 return ScreenAction::Pop;
             }
+            // Global 'u' shortcut — same behavior as Enter on the Submit button. Suppressed
+            // while focus is on the Password field so the letter remains typeable there.
+            // Capital 'U' / Ctrl-U etc. fall through to existing handlers.
+            if matches!(k.code, KeyCode::Char('u'))
+                && k.modifiers.is_empty()
+                && *focus != Field::Password
+            {
+                let password_text = password.lines().join("");
+                let password_val = if password_text.is_empty() {
+                    None
+                } else {
+                    Some(password_text)
+                };
+                let expiration = if ctx.client.is_authenticated() {
+                    Some(EXPIRES_OPTIONS[*expires_idx].1.to_string())
+                } else {
+                    None
+                };
+                let one_time_val = ctx.client.is_authenticated() && *one_time;
+                return start_upload(s, password_val, expiration, one_time_val, ctx);
+            }
             if matches!(k.code, KeyCode::Tab) {
                 *focus = next_field(*focus, ctx.client.is_authenticated());
                 return ScreenAction::Stay;
@@ -122,12 +143,14 @@ pub fn update(s: &mut State, ev: &Event, ctx: &mut AppCtx) -> ScreenAction {
                         return ScreenAction::Stay;
                     }
                     match k.code {
+                        // Left/Right cycle expiration options here — they don't go back.
                         KeyCode::Left | KeyCode::Char('h') => {
                             if *expires_idx > 0 { *expires_idx -= 1; }
                         }
                         KeyCode::Right | KeyCode::Char('l') => {
                             if *expires_idx + 1 < EXPIRES_OPTIONS.len() { *expires_idx += 1; }
                         }
+                        KeyCode::Char('b') if k.modifiers.is_empty() => return ScreenAction::Pop,
                         _ => {}
                     }
                     ScreenAction::Stay
@@ -136,8 +159,13 @@ pub fn update(s: &mut State, ev: &Event, ctx: &mut AppCtx) -> ScreenAction {
                     if !ctx.client.is_authenticated() {
                         return ScreenAction::Stay;
                     }
-                    if matches!(k.code, KeyCode::Char(' ') | KeyCode::Enter) {
-                        *one_time = !*one_time;
+                    match k.code {
+                        KeyCode::Char(' ') | KeyCode::Enter => {
+                            *one_time = !*one_time;
+                        }
+                        KeyCode::Char('b') if k.modifiers.is_empty() => return ScreenAction::Pop,
+                        KeyCode::Left => return ScreenAction::Pop,
+                        _ => {}
                     }
                     ScreenAction::Stay
                 }
@@ -156,6 +184,14 @@ pub fn update(s: &mut State, ev: &Event, ctx: &mut AppCtx) -> ScreenAction {
                         };
                         let one_time_val = ctx.client.is_authenticated() && *one_time;
                         start_upload(s, password_val, expiration, one_time_val, ctx)
+                    } else if matches!(k.code, KeyCode::Char('b')) && k.modifiers.is_empty() {
+                        // Lowercase 'b' on the submit button drops back to the file picker, so
+                        // a stray Enter on the picker can be undone. Capital 'B' (Shift+b)
+                        // deliberately falls through to the password-forwarding branch below
+                        // so it can still be typed into a password.
+                        ScreenAction::Pop
+                    } else if matches!(k.code, KeyCode::Left) {
+                        ScreenAction::Pop
                     } else if ctx.client.is_authenticated() && matches!(k.code, KeyCode::Char(_)) {
                         // Typing on the Submit button jumps to Password and forwards the key,
                         // so users can start typing without moving focus first.
@@ -341,8 +377,14 @@ fn render_form(
 ) {
     let inner = card(f, area, "Upload", Color::Cyan);
 
-    let files_h = paths.len() as u16 + 1;
     let options_h: u16 = if authenticated { 11 } else { 2 };
+    // Reserve space for the options block + submit button + spacers + hints so a share with
+    // many files can't push them off-screen. The file list shrinks first; the renderer drops
+    // a final " ..." row to signal that some entries were hidden.
+    let fixed_h: u16 = 1 + 1 + options_h + 1 + 3 + 1; // chunks 0,2,3,4,5,7
+    let want_files_h = paths.len() as u16 + 1;
+    let max_files_h = inner.height.saturating_sub(fixed_h);
+    let files_h = want_files_h.min(max_files_h).max(2);
 
     let chunks = Layout::vertical([
         Constraint::Length(1),
@@ -378,7 +420,7 @@ fn render_form(
     hints_bar(
         f,
         chunks[7],
-        "[Enter] upload    [\u{2193}/Tab] options    [Esc] cancel",
+        "[Enter/u] upload    [Tab/\u{2191}\u{2193}] options    [b/\u{2190}] picker    [Esc] cancel",
     );
 }
 
@@ -392,22 +434,57 @@ fn section_header(text: impl Into<String>) -> Line<'static> {
 }
 
 fn render_files_section(f: &mut Frame, area: Rect, paths: &[PathBuf]) {
-    let mut lines: Vec<Line> = Vec::with_capacity(paths.len() + 1);
+    let cap = area.height as usize;
+    if cap == 0 { return; }
+
+    let mut lines: Vec<Line> = Vec::with_capacity(cap);
     lines.push(section_header(format!("Files ({})", paths.len())));
-    for p in paths {
-        let name = p
-            .file_name()
-            .map(|s| s.to_string_lossy().to_string())
-            .unwrap_or_default();
-        let size = std::fs::metadata(p).map(|m| m.len()).unwrap_or(0);
+
+    // One row for the header, then one row per file. If we don't have enough rows for every
+    // file, sacrifice the last visible row to a "…" hint so the user knows some files were
+    // dropped from view (instead of silently truncating).
+    let visible_rows = cap.saturating_sub(1);
+    let total = paths.len();
+    let need_overflow = total > visible_rows;
+    let shown = if need_overflow { visible_rows.saturating_sub(1) } else { total };
+
+    let visible: Vec<(String, String)> = paths
+        .iter()
+        .take(shown)
+        .map(|p| {
+            let name = p
+                .file_name()
+                .map(|s| s.to_string_lossy().to_string())
+                .unwrap_or_default();
+            let size = std::fs::metadata(p).map(|m| m.len()).unwrap_or(0);
+            (name, crate::format::format_size_u64(size))
+        })
+        .collect();
+
+    let max_size_w = visible.iter().map(|(_, s)| s.len()).max().unwrap_or(0);
+
+    const PREFIX_W: usize = 3;
+    const GAP_W: usize = 2;
+    let avail = (area.width as usize).saturating_sub(PREFIX_W + GAP_W + max_size_w);
+    let name_w = avail.max(5);
+
+    for (name, size_str) in visible.iter() {
+        let size_left_pad = max_size_w.saturating_sub(size_str.len());
+        let name_truncated = crate::format::truncate_display(name, name_w);
+        let name_padded = crate::format::pad_display(&name_truncated, name_w);
+
         lines.push(Line::from(vec![
             Span::styled(" \u{2022} ", Style::default().fg(Color::Cyan)),
-            Span::raw(name),
-            Span::styled(
-                format!("    {}", crate::format::format_size_u64(size)),
-                Style::default().fg(Color::DarkGray),
-            ),
+            Span::raw(name_padded),
+            Span::raw(" ".repeat(GAP_W + size_left_pad)),
+            Span::styled(size_str.clone(), Style::default().fg(Color::DarkGray)),
         ]));
+    }
+    if need_overflow {
+        lines.push(Line::from(Span::styled(
+            "   \u{2026}",
+            Style::default().fg(Color::DarkGray),
+        )));
     }
     f.render_widget(Paragraph::new(lines), area);
 }
@@ -705,7 +782,7 @@ fn render_done(f: &mut Frame, area: Rect, r: &ShareResult, copied: bool) {
         );
     }
 
-    hints_bar(f, chunks[6], "[c] copy code    [Enter/b/\u{2190}] back");
+    hints_bar(f, chunks[6], "[c] copy code    [Enter/Esc/q] home    [b/\u{2190}] new upload");
 }
 
 fn render_failed(f: &mut Frame, area: Rect, msg: &str) {
@@ -740,5 +817,5 @@ fn render_failed(f: &mut Frame, area: Rect, msg: &str) {
         chunks[2],
     );
 
-    hints_bar(f, chunks[3], "[Enter/b/\u{2190}] back");
+    hints_bar(f, chunks[3], "[Enter/Esc/q/b/\u{2190}] retry");
 }

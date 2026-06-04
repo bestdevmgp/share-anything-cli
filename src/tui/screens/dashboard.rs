@@ -67,6 +67,7 @@ enum Action {
     SecureTransfer,
     Info,
     Delete,
+    DeleteAll,
     Logout,
     SignIn,
     Quit,
@@ -80,6 +81,7 @@ fn visible_actions(authenticated: bool) -> &'static [Action] {
             Action::SecureTransfer,
             Action::Info,
             Action::Delete,
+            Action::DeleteAll,
             Action::Logout,
             Action::Quit,
         ]
@@ -102,6 +104,7 @@ fn action_key(a: Action) -> &'static str {
         Action::SecureTransfer => "s",
         Action::Info => "i",
         Action::Delete => "x",
+        Action::DeleteAll => "X",
         Action::Logout => "L",
         Action::SignIn => "L",
         Action::Quit => "Q",
@@ -115,6 +118,7 @@ fn action_label(a: Action) -> &'static str {
         Action::SecureTransfer => "Secure Transfer",
         Action::Info => "Info",
         Action::Delete => "Delete",
+        Action::DeleteAll => "Delete all",
         Action::Logout => "Sign out",
         Action::SignIn => "Sign in",
         Action::Quit => "Quit",
@@ -176,11 +180,31 @@ fn execute_action(a: Action, s: &mut State, ctx: &mut AppCtx) -> ScreenAction {
                 ScreenAction::Stay
             }
         }
+        Action::DeleteAll => start_delete_all(s, ctx),
         Action::Logout => ScreenAction::Push(crate::tui::app::Screen::Logout(
             crate::tui::screens::logout::State::new(),
         )),
         Action::SignIn => ScreenAction::PushLogin,
         Action::Quit => ScreenAction::Quit,
+    }
+}
+
+/// Open the bulk-delete confirmation if the user is signed in and has shares.
+/// Shared by the Actions-menu entry and the hidden `X` shortcut so they stay in lock-step.
+fn start_delete_all(s: &State, ctx: &mut AppCtx) -> ScreenAction {
+    if !ctx.client.is_authenticated() {
+        *ctx.toast = Some(crate::tui::widgets::toast::Toast::warn(
+            "Sign in to manage shares.",
+        ));
+        ScreenAction::Stay
+    } else if s.items.is_empty() {
+        *ctx.toast = Some(crate::tui::widgets::toast::Toast::warn(
+            "No shares to delete.",
+        ));
+        ScreenAction::Stay
+    } else {
+        let state = crate::tui::screens::delete::State::new_all(s.items.len());
+        ScreenAction::Push(crate::tui::app::Screen::Delete(state))
     }
 }
 
@@ -236,19 +260,46 @@ pub fn update(s: &mut State, ev: &Event, ctx: &mut AppCtx) -> ScreenAction {
     match k.code {
         KeyCode::Char('Q') | KeyCode::Esc => ScreenAction::Quit,
 
-        KeyCode::Tab | KeyCode::Right | KeyCode::Char('l') => {
+        KeyCode::Tab => {
             cycle_focus_next(s, authenticated);
             ScreenAction::Stay
         }
+        KeyCode::Right | KeyCode::Char('l') => {
+            // Spatial: Uploads/Downloads sit in the left column, Actions in the right.
+            // → from either left panel jumps straight to Actions instead of cycling through
+            // the other left panel. From Actions, wrap to the top-left (Uploads).
+            match s.focus {
+                PanelFocus::Uploads | PanelFocus::Downloads => {
+                    if focus_is_reachable(s, PanelFocus::Actions, authenticated) {
+                        s.focus = PanelFocus::Actions;
+                    }
+                }
+                PanelFocus::Actions => {
+                    if focus_is_reachable(s, PanelFocus::Uploads, authenticated) {
+                        s.focus = PanelFocus::Uploads;
+                    } else if focus_is_reachable(s, PanelFocus::Downloads, authenticated) {
+                        s.focus = PanelFocus::Downloads;
+                    }
+                }
+            }
+            ScreenAction::Stay
+        }
         KeyCode::Left | KeyCode::Char('h') => {
-            // From Actions, ← jumps straight to Uploads (top-left) rather than cycling
-            // through Downloads first.
-            if s.focus == PanelFocus::Actions
-                && focus_is_reachable(s, PanelFocus::Uploads, authenticated)
-            {
-                s.focus = PanelFocus::Uploads;
-            } else {
-                cycle_focus_prev(s, authenticated);
+            // Spatial mirror: ← from Actions jumps to the top-left (Uploads). From the left
+            // column, wrap to Actions.
+            match s.focus {
+                PanelFocus::Actions => {
+                    if focus_is_reachable(s, PanelFocus::Uploads, authenticated) {
+                        s.focus = PanelFocus::Uploads;
+                    } else if focus_is_reachable(s, PanelFocus::Downloads, authenticated) {
+                        s.focus = PanelFocus::Downloads;
+                    }
+                }
+                PanelFocus::Uploads | PanelFocus::Downloads => {
+                    if focus_is_reachable(s, PanelFocus::Actions, authenticated) {
+                        s.focus = PanelFocus::Actions;
+                    }
+                }
             }
             ScreenAction::Stay
         }
@@ -347,6 +398,7 @@ pub fn update(s: &mut State, ev: &Event, ctx: &mut AppCtx) -> ScreenAction {
         KeyCode::Char('s') => execute_action(Action::SecureTransfer, s, ctx),
         KeyCode::Char('i') => execute_action(Action::Info, s, ctx),
         KeyCode::Char('x') => execute_action(Action::Delete, s, ctx),
+        KeyCode::Char('X') => start_delete_all(s, ctx),
         KeyCode::Char('L') => {
             if authenticated {
                 execute_action(Action::Logout, s, ctx)
@@ -604,7 +656,7 @@ fn render_actions_panel(s: &State, f: &mut Frame, area: Rect, authenticated: boo
         .map(|(i, &a)| {
             let mut line = action_line(action_key(a), action_label(a));
 
-            if a == Action::Delete && s.items.is_empty() {
+            if matches!(a, Action::Delete | Action::DeleteAll) && s.items.is_empty() {
                 line = Line::from(
                     line.spans
                         .into_iter()

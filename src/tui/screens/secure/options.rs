@@ -54,10 +54,14 @@ pub enum Phase {
         log: Vec<String>,
         /// ICE picked a TURN relay candidate — flagged so the UI can warn about slower throughput.
         relay_in_use: bool,
+        /// Flipped to `true` after the user presses [c] so the inline "Press [c] to copy"
+        /// hint can morph into a green confirmation in place.
+        copied: bool,
     },
     Done {
         share_code: String,
         log: Vec<String>,
+        copied: bool,
     },
     Failed(String),
 }
@@ -110,6 +114,12 @@ pub fn update(s: &mut State, ev: &Event, ctx: &mut AppCtx) -> ScreenAction {
                         let pw = if pw_text.is_empty() { None } else { Some(pw_text) };
                         start_send(s, pw, ctx)
                     }
+                    // Lowercase 'b' (no modifiers) and Left arrow drop back to the file picker
+                    // so a stray Enter on the picker can be undone. Capital 'B' (Shift+b) is
+                    // deliberately excluded — it still flows into the password field along
+                    // with every other typed character.
+                    KeyCode::Char('b') if k.modifiers.is_empty() => ScreenAction::Pop,
+                    KeyCode::Left => ScreenAction::Pop,
                     KeyCode::Char(_) if *authenticated => {
                         // Typing a character while focus is on Submit jumps focus to the
                         // password field and forwards the keystroke.
@@ -134,17 +144,18 @@ pub fn update(s: &mut State, ev: &Event, ctx: &mut AppCtx) -> ScreenAction {
                 },
             }
         }
-        Phase::Running { share_code, .. } => {
+        Phase::Running { share_code, copied, .. } => {
             let Event::Key(k) = ev else { return ScreenAction::Stay; };
             match k.code {
                 KeyCode::Char('c') => {
                     if let Some(code) = share_code.as_deref() {
-                        let ok = crate::tui::copy_to_clipboard(code);
-                        *ctx.toast = Some(if ok {
-                            crate::tui::widgets::toast::Toast::success("Share code copied to clipboard.")
+                        if crate::tui::copy_to_clipboard(code) {
+                            *copied = true;
                         } else {
-                            crate::tui::widgets::toast::Toast::warn("Clipboard unavailable - code is shown above.")
-                        });
+                            *ctx.toast = Some(crate::tui::widgets::toast::Toast::warn(
+                                "Clipboard unavailable - code is shown above.",
+                            ));
+                        }
                     }
                     ScreenAction::Stay
                 }
@@ -152,16 +163,17 @@ pub fn update(s: &mut State, ev: &Event, ctx: &mut AppCtx) -> ScreenAction {
                 _ => ScreenAction::Stay,
             }
         }
-        Phase::Done { share_code, .. } => {
+        Phase::Done { share_code, copied, .. } => {
             let Event::Key(k) = ev else { return ScreenAction::Stay; };
             match k.code {
                 KeyCode::Char('c') => {
-                    let ok = crate::tui::copy_to_clipboard(share_code);
-                    *ctx.toast = Some(if ok {
-                        crate::tui::widgets::toast::Toast::success("Share code copied to clipboard.")
+                    if crate::tui::copy_to_clipboard(share_code) {
+                        *copied = true;
                     } else {
-                        crate::tui::widgets::toast::Toast::warn("Clipboard unavailable - code is shown above.")
-                    });
+                        *ctx.toast = Some(crate::tui::widgets::toast::Toast::warn(
+                            "Clipboard unavailable - code is shown above.",
+                        ));
+                    }
                     ScreenAction::Stay
                 }
                 // ← / b drop back into the picker so the same selection can be re-sent with
@@ -206,6 +218,7 @@ fn start_send(s: &mut State, password: Option<String>, ctx: &mut AppCtx) -> Scre
         started_at: std::time::Instant::now(),
         log: vec!["Connecting to signaling server\u{2026}".into()],
         relay_in_use: false,
+        copied: false,
     };
     let Some(tx) = ctx.tx.cloned() else {
         s.phase = Phase::Failed("Internal error: event channel not ready.".into());
@@ -247,6 +260,7 @@ pub fn render(s: &State, f: &mut Frame) {
             started_at,
             log,
             relay_in_use,
+            copied,
             ..
         } => {
             render_running(
@@ -261,9 +275,10 @@ pub fn render(s: &State, f: &mut Frame) {
                 *started_at,
                 log,
                 *relay_in_use,
+                *copied,
             );
         }
-        Phase::Done { share_code, log } => render_done(f, area, share_code, log),
+        Phase::Done { share_code, log, copied } => render_done(f, area, share_code, log, *copied),
         Phase::Failed(msg) => render_failed(f, area, msg),
     }
 }
@@ -278,8 +293,13 @@ fn render_form(
 ) {
     let inner = card(f, area, "Secure Transfer (P2P)", Color::Cyan);
 
-    let files_h = paths.len() as u16 + 1;
     let options_h: u16 = if authenticated { 4 } else { 2 };
+    // Reserve space for options + submit button + spacers + hints; the file list shrinks
+    // first so they can't be pushed off-screen. Truncated entries collapse into a "…" row.
+    let fixed_h: u16 = 1 + 1 + options_h + 1 + 3 + 1; // chunks 0,2,3,4,5,7
+    let want_files_h = paths.len() as u16 + 1;
+    let max_files_h = inner.height.saturating_sub(fixed_h);
+    let files_h = want_files_h.min(max_files_h).max(2);
 
     let chunks = Layout::vertical([
         Constraint::Length(1),
@@ -299,7 +319,7 @@ fn render_form(
     // an always-available action rather than a focus target.
     render_submit_button(f, chunks[5], true);
 
-    hints_bar(f, chunks[7], "[Enter] start    [Esc] cancel");
+    hints_bar(f, chunks[7], "[Enter] start    [b/\u{2190}] picker    [Esc] cancel");
 }
 
 fn card(f: &mut Frame, area: Rect, title: &str, accent: Color) -> Rect {
@@ -337,22 +357,56 @@ fn hints_bar(f: &mut Frame, area: Rect, text: &str) {
 }
 
 fn render_files_section(f: &mut Frame, area: Rect, paths: &[PathBuf]) {
-    let mut lines: Vec<Line> = Vec::with_capacity(paths.len() + 1);
+    let cap = area.height as usize;
+    if cap == 0 { return; }
+
+    let mut lines: Vec<Line> = Vec::with_capacity(cap);
     lines.push(section_header(format!("Files ({})", paths.len())));
-    for p in paths {
-        let name = p
-            .file_name()
-            .map(|s| s.to_string_lossy().to_string())
-            .unwrap_or_default();
-        let size = std::fs::metadata(p).map(|m| m.len()).unwrap_or(0);
+
+    // Drop the last visible row to a "…" hint when entries would otherwise be silently cut
+    // off, so the user knows the list is longer than what's shown.
+    let visible_rows = cap.saturating_sub(1);
+    let total = paths.len();
+    let need_overflow = total > visible_rows;
+    let shown = if need_overflow { visible_rows.saturating_sub(1) } else { total };
+
+    let visible: Vec<(String, String)> = paths
+        .iter()
+        .take(shown)
+        .map(|p| {
+            let name = p
+                .file_name()
+                .map(|s| s.to_string_lossy().to_string())
+                .unwrap_or_default();
+            let size = std::fs::metadata(p).map(|m| m.len()).unwrap_or(0);
+            (name, crate::format::format_size_u64(size))
+        })
+        .collect();
+
+    let max_size_w = visible.iter().map(|(_, s)| s.len()).max().unwrap_or(0);
+
+    const PREFIX_W: usize = 3;
+    const GAP_W: usize = 2;
+    let avail = (area.width as usize).saturating_sub(PREFIX_W + GAP_W + max_size_w);
+    let name_w = avail.max(5);
+
+    for (name, size_str) in visible.iter() {
+        let size_left_pad = max_size_w.saturating_sub(size_str.len());
+        let name_truncated = crate::format::truncate_display(name, name_w);
+        let name_padded = crate::format::pad_display(&name_truncated, name_w);
+
         lines.push(Line::from(vec![
             Span::styled(" \u{2022} ", Style::default().fg(Color::Cyan)),
-            Span::raw(name),
-            Span::styled(
-                format!("    {}", crate::format::format_size_u64(size)),
-                Style::default().fg(Color::DarkGray),
-            ),
+            Span::raw(name_padded),
+            Span::raw(" ".repeat(GAP_W + size_left_pad)),
+            Span::styled(size_str.clone(), Style::default().fg(Color::DarkGray)),
         ]));
+    }
+    if need_overflow {
+        lines.push(Line::from(Span::styled(
+            "   \u{2026}",
+            Style::default().fg(Color::DarkGray),
+        )));
     }
     f.render_widget(Paragraph::new(lines), area);
 }
@@ -409,7 +463,7 @@ fn render_options_section(
 }
 
 fn render_submit_button(f: &mut Frame, area: Rect, focused: bool) {
-    let btn_text = " Start Secure Transfer (Enter) ";
+    let btn_text = " [Enter] Start Secure Transfer ";
     let btn_width = (btn_text.chars().count() as u16 + 4).min(area.width);
     let x = area.x + (area.width.saturating_sub(btn_width)) / 2;
     let btn_area = Rect {
@@ -467,7 +521,7 @@ fn spinner_frame() -> &'static str {
     FRAMES[(ms / 80) as usize % FRAMES.len()]
 }
 
-fn session_step_line(state: StepState, share_code: Option<&str>) -> Line<'static> {
+fn session_step_line(state: StepState, share_code: Option<&str>, copied: bool) -> Line<'static> {
     let (marker, marker_style) = step_marker(&state);
     let label_style = match state {
         StepState::Pending => Style::default().fg(Color::DarkGray),
@@ -488,10 +542,17 @@ fn session_step_line(state: StepState, share_code: Option<&str>) -> Line<'static
                 .fg(Color::Cyan)
                 .add_modifier(Modifier::BOLD),
         ));
-        spans.push(Span::styled(
-            "    Press [c] to copy the share code",
-            Style::default().fg(Color::DarkGray).add_modifier(Modifier::DIM),
-        ));
+        if copied {
+            spans.push(Span::styled(
+                "    \u{2713} Copied to clipboard",
+                Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
+            ));
+        } else {
+            spans.push(Span::styled(
+                "    Press [c] to copy the share code",
+                Style::default().fg(Color::DarkGray).add_modifier(Modifier::DIM),
+            ));
+        }
     }
     Line::from(spans)
 }
@@ -547,6 +608,7 @@ fn render_running(
     started_at: std::time::Instant,
     log: &[String],
     relay_in_use: bool,
+    copied: bool,
 ) {
     let active_file = active_idx.and_then(|i| file_states.get(i));
     // Big gauge is redundant when there are several files (each row already has its own inline
@@ -649,7 +711,7 @@ fn render_running(
     let complete_state = StepState::Pending;
 
     let steps = vec![
-        session_step_line(session_state, share_code),
+        session_step_line(session_state, share_code, copied),
         step_line(receiver_state, receiver_label, receiver_detail),
         step_line(awaiting_state, "Awaiting request", None),
         step_line(transferring_state, "Transferring", transferring_detail),
@@ -786,9 +848,9 @@ fn render_running(
     );
 
     let hint_text = if share_code.is_some() {
-        " [c] copy code    [b/\u{2190}] back    [Ctrl+C] cancel "
+        " [c] copy code    [b/\u{2190}/Esc] back    [Ctrl+C] cancel "
     } else {
-        " [b/\u{2190}] back    [Ctrl+C] cancel "
+        " [b/\u{2190}/Esc] back    [Ctrl+C] cancel "
     };
     f.render_widget(
         Paragraph::new(hint_text).style(Style::default().fg(Color::DarkGray)),
@@ -796,12 +858,11 @@ fn render_running(
     );
 }
 
-fn render_done(f: &mut Frame, area: Rect, share_code: &str, log: &[String]) {
+fn render_done(f: &mut Frame, area: Rect, share_code: &str, log: &[String], copied: bool) {
     let chunks = Layout::vertical([
         Constraint::Length(2),
         Constraint::Length(2),
-        Constraint::Min(0),
-        Constraint::Length(5),
+        Constraint::Min(5),
         Constraint::Length(1),
     ])
     .split(area);
@@ -814,28 +875,36 @@ fn render_done(f: &mut Frame, area: Rect, share_code: &str, log: &[String]) {
         )),
         chunks[0],
     );
+    let copy_hint = if copied {
+        Line::from(Span::styled(
+            " \u{2713} Copied to clipboard",
+            Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
+        ))
+    } else {
+        Line::from(Span::styled(
+            " Press [c] to copy the share code",
+            Style::default().fg(Color::DarkGray).add_modifier(Modifier::DIM),
+        ))
+    };
     f.render_widget(
         Paragraph::new(vec![
             Line::from(format!(" Share code was: {}", share_code)),
-            Line::from(Span::styled(
-                " Press [c] to copy the share code",
-                Style::default().fg(Color::DarkGray).add_modifier(Modifier::DIM),
-            )),
+            copy_hint,
         ]),
         chunks[1],
     );
-    let max_lines = chunks[3].height.saturating_sub(2) as usize;
+    let max_lines = chunks[2].height.saturating_sub(2) as usize;
     let start = log.len().saturating_sub(max_lines.max(1));
     let log_lines: Vec<Line> = log[start..].iter().map(|s| Line::from(s.as_str())).collect();
     f.render_widget(
         Paragraph::new(log_lines)
             .block(Block::default().borders(Borders::ALL).title(" Log ")),
-        chunks[3],
+        chunks[2],
     );
     f.render_widget(
-        Paragraph::new(" [c] copy code    [Enter/b/\u{2190}] back ")
+        Paragraph::new(" [c] copy code    [Enter/Esc/q] home    [b/\u{2190}] new transfer ")
             .style(Style::default().fg(Color::DarkGray)),
-        chunks[4],
+        chunks[3],
     );
 }
 
@@ -859,7 +928,7 @@ fn render_failed(f: &mut Frame, area: Rect, msg: &str) {
         chunks[1],
     );
     f.render_widget(
-        Paragraph::new(" [Enter/b/\u{2190}] back ")
+        Paragraph::new(" [Enter/Esc/q/b/\u{2190}] retry ")
             .style(Style::default().fg(Color::DarkGray)),
         chunks[3],
     );

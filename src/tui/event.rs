@@ -1,6 +1,6 @@
 use crate::core::auth::{DeviceSession, DeviceStatus};
 use crate::core::error::CoreError;
-use crate::core::shares::{DownloadItem, FileInfo, UploadItem};
+use crate::core::shares::{DeleteAllOutcome, DownloadItem, FileInfo, UploadItem};
 use crate::core::upload::ShareResult;
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use std::path::PathBuf;
@@ -20,11 +20,25 @@ pub enum Event {
     UploadFinished(Result<ShareResult, CoreError>),
 
     DownloadInfo(Result<FileInfo, CoreError>),
+    /// Outcome of `POST /file/verify-password` issued during the download flow.
+    /// Carries the unit result so the screen can route to `ChoosePath` on success
+    /// or bounce back to `NeedsPassword` with a toast on failure.
+    DownloadPasswordVerified(Result<(), CoreError>),
+    /// Timer fired: the brief `Password verified` success state has been on screen long
+    /// enough; advance to `ChoosePath`. Sent by a `sleep` task spawned right after the
+    /// `DownloadPasswordVerified(Ok)` event is handled.
+    DownloadPasswordAutoTransition,
     DownloadProgress { delta: u64 },
     DownloadFinished(Result<PathBuf, CoreError>),
+    /// One file in a multi-file "save each" download just finished. Carries the index
+    /// of the file that completed and where it was saved. The downloader task emits one
+    /// of these per file, then `DownloadEachFinished` at the end.
+    DownloadEachAdvance { idx: usize, saved: PathBuf },
+    DownloadEachFinished(Result<Vec<PathBuf>, CoreError>),
 
     InfoLoaded(Result<FileInfo, CoreError>),
     DeleteFinished(Result<String, CoreError>),
+    DeleteAllFinished(Result<DeleteAllOutcome, CoreError>),
 
     LoginSessionReady(Result<DeviceSession, CoreError>),
     LoginPolled(Result<DeviceStatus, CoreError>),

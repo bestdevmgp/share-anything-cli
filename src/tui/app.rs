@@ -1,11 +1,24 @@
 use crate::client::ApiClient;
 use crate::config::CliConfig;
+use crate::core::error::CoreError;
 use crate::tui::event::{Event, Tx};
 use crate::tui::screens;
 use crate::tui::widgets::toast::Toast;
 use crossterm::event::{KeyCode, KeyModifiers};
 use ratatui::Frame;
 use tokio::task::AbortHandle;
+
+fn new_password_textarea() -> tui_textarea::TextArea<'static> {
+    let mut password = tui_textarea::TextArea::default();
+    password.set_placeholder_text("Password");
+    password.set_mask_char('•');
+    password.set_block(
+        ratatui::widgets::Block::default()
+            .borders(ratatui::widgets::Borders::ALL)
+            .title(" Password "),
+    );
+    password
+}
 
 #[allow(clippy::large_enum_variant)]
 pub enum Screen {
@@ -191,20 +204,17 @@ impl App {
                     match result {
                         Ok(info) => {
                             if info.has_password {
-                                let mut password = tui_textarea::TextArea::default();
-                                password.set_placeholder_text("Password");
-                                password.set_mask_char('•');
-                                password.set_block(
-                                    ratatui::widgets::Block::default()
-                                        .borders(ratatui::widgets::Borders::ALL)
-                                        .title(" Password "),
-                                );
-                                s.phase = crate::tui::screens::download::Phase::NeedsPassword { info, password };
+                                s.phase = crate::tui::screens::download::Phase::NeedsPassword {
+                                    info,
+                                    password: new_password_textarea(),
+                                    error: None,
+                                };
                             } else {
                                 s.phase = crate::tui::screens::download::Phase::ChoosePath {
                                     info,
                                     password: None,
                                     picker: crate::tui::screens::download::PathPicker::new(),
+                                    mode: crate::tui::screens::download::ModeChoice::Each,
                                 };
                             }
                         }
@@ -214,10 +224,98 @@ impl App {
                     }
                 }
             }
+            Event::DownloadPasswordVerified(result) => {
+                if let Some(Screen::Download(s)) = self.stack.last_mut() {
+                    let replaced = std::mem::replace(
+                        &mut s.phase,
+                        crate::tui::screens::download::Phase::Failed(
+                            "Internal state error.".into(),
+                        ),
+                    );
+                    if let crate::tui::screens::download::Phase::VerifyingPassword {
+                        info,
+                        password,
+                    } = replaced
+                    {
+                        match result {
+                            Ok(()) => {
+                                s.phase = crate::tui::screens::download::Phase::PasswordVerified {
+                                    info,
+                                    password,
+                                };
+                                if let Some(tx) = self.tx.clone() {
+                                    let h = tokio::spawn(async move {
+                                        tokio::time::sleep(
+                                            std::time::Duration::from_millis(600),
+                                        )
+                                        .await;
+                                        let _ = tx.send(Event::DownloadPasswordAutoTransition);
+                                    });
+                                    if let Some(tasks) = self.screen_tasks.last_mut() {
+                                        tasks.push(h.abort_handle());
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                let msg = match &e {
+                                    CoreError::Api { status: 401, .. } => {
+                                        "Incorrect password. Please try again.".to_string()
+                                    }
+                                    _ => format!("Verification failed: {}", e),
+                                };
+                                s.phase = crate::tui::screens::download::Phase::NeedsPassword {
+                                    info,
+                                    password: new_password_textarea(),
+                                    error: Some(msg),
+                                };
+                            }
+                        }
+                    }
+                }
+            }
+            Event::DownloadPasswordAutoTransition => {
+                if let Some(Screen::Download(s)) = self.stack.last_mut() {
+                    let replaced = std::mem::replace(
+                        &mut s.phase,
+                        crate::tui::screens::download::Phase::Failed(
+                            "Internal state error.".into(),
+                        ),
+                    );
+                    if let crate::tui::screens::download::Phase::PasswordVerified {
+                        info,
+                        password,
+                    } = replaced
+                    {
+                        s.phase = crate::tui::screens::download::Phase::ChoosePath {
+                            info,
+                            password: Some(password),
+                            picker: crate::tui::screens::download::PathPicker::new(),
+                            mode: crate::tui::screens::download::ModeChoice::Each,
+                        };
+                    } else {
+                        // User Esc'd out of PasswordVerified before the timer fired —
+                        // restore whatever phase they're on now.
+                        s.phase = replaced;
+                    }
+                }
+            }
             Event::DownloadProgress { delta } => {
                 if let Some(Screen::Download(s)) = self.stack.last_mut() {
-                    if let crate::tui::screens::download::Phase::Running { received, total, .. } = &mut s.phase {
-                        *received = received.saturating_add(delta).min(*total);
+                    match &mut s.phase {
+                        crate::tui::screens::download::Phase::Running { received, total, .. } => {
+                            *received = received.saturating_add(delta).min(*total);
+                        }
+                        crate::tui::screens::download::Phase::RunningEach {
+                            file_received,
+                            file_total,
+                            total_received,
+                            total_total,
+                            ..
+                        } => {
+                            *file_received = file_received.saturating_add(delta).min(*file_total);
+                            *total_received = total_received.saturating_add(delta).min(*total_total);
+                        }
+                        _ => {}
                     }
                 }
             }
@@ -225,6 +323,40 @@ impl App {
                 if let Some(Screen::Download(s)) = self.stack.last_mut() {
                     s.phase = match result {
                         Ok(saved) => crate::tui::screens::download::Phase::Done { saved },
+                        Err(e) => crate::tui::screens::download::Phase::Failed(e.to_string()),
+                    };
+                }
+            }
+            Event::DownloadEachAdvance { idx, saved } => {
+                if let Some(Screen::Download(s)) = self.stack.last_mut() {
+                    if let crate::tui::screens::download::Phase::RunningEach {
+                        info,
+                        current_idx,
+                        file_received,
+                        file_total,
+                        saved_files,
+                        ..
+                    } = &mut s.phase
+                    {
+                        // Snap per-file gauge to 100% so the user sees the file finish cleanly,
+                        // then advance to the next file's metadata.
+                        *file_received = *file_total;
+                        saved_files.push(saved);
+                        let next = idx + 1;
+                        *current_idx = next;
+                        *file_received = 0;
+                        *file_total = info
+                            .files
+                            .get(next)
+                            .map(|f| f.file_size.max(0) as u64)
+                            .unwrap_or(0);
+                    }
+                }
+            }
+            Event::DownloadEachFinished(result) => {
+                if let Some(Screen::Download(s)) = self.stack.last_mut() {
+                    s.phase = match result {
+                        Ok(saved_files) => crate::tui::screens::download::Phase::DoneEach { saved_files },
                         Err(e) => crate::tui::screens::download::Phase::Failed(e.to_string()),
                     };
                 }
@@ -261,6 +393,42 @@ impl App {
                             s.phase = crate::tui::screens::delete::Phase::Failed(e.to_string());
                         } else {
                             self.toast = Some(Toast::error(format!("Delete failed: {}", e)));
+                        }
+                    }
+                }
+            }
+            Event::DeleteAllFinished(result) => {
+                match result {
+                    Ok(outcome) => {
+                        for screen in self.stack.iter_mut() {
+                            if let Screen::Dashboard(d) = screen {
+                                d.items.clear();
+                                d.selected = 0;
+                                break;
+                            }
+                        }
+                        let msg = if outcome.failures.is_empty() {
+                            format!("Deleted {} share(s).", outcome.deleted)
+                        } else {
+                            format!(
+                                "Deleted {} share(s); {} failed.",
+                                outcome.deleted,
+                                outcome.failures.len()
+                            )
+                        };
+                        self.toast = Some(crate::tui::widgets::toast::Toast::success(msg));
+                        self.abort_top_screen_tasks();
+                        self.stack.pop();
+                        if self.stack.is_empty() { self.quit = true; }
+                        // Refresh uploads so the dashboard reflects any rows the bulk delete
+                        // couldn't reach (rare — usually the list ends up empty).
+                        self.refresh_dashboard_if_top();
+                    }
+                    Err(e) => {
+                        if let Some(Screen::Delete(s)) = self.stack.last_mut() {
+                            s.phase = crate::tui::screens::delete::Phase::Failed(e.to_string());
+                        } else {
+                            self.toast = Some(Toast::error(format!("Delete all failed: {}", e)));
                         }
                     }
                 }
@@ -325,7 +493,9 @@ impl App {
                                     let name = status.user_name.unwrap_or_else(|| "User".to_string());
                                     self.abort_top_screen_tasks();
                                     self.stack.pop();
-                                    self.toast = Some(Toast::success(format!("Welcome, {}!", name)));
+                                    let mut welcome = Toast::success(format!("Welcome, {}!", name));
+                                    welcome.ttl_ms = 10000;
+                                    self.toast = Some(welcome);
                                     self.refresh_dashboard_if_top();
                                 } else if let Some(Screen::Login(s)) = self.stack.last_mut() {
                                     s.phase = crate::tui::screens::login::Phase::Failed(
@@ -413,6 +583,7 @@ impl App {
                                 s.phase = crate::tui::screens::secure::options::Phase::Done {
                                     share_code: code,
                                     log: log_taken,
+                                    copied: false,
                                 };
                             }
                             E::ReceiverDisconnected => {
@@ -424,6 +595,7 @@ impl App {
                                 s.phase = crate::tui::screens::secure::options::Phase::Done {
                                     share_code: code,
                                     log: log_taken,
+                                    copied: false,
                                 };
                             }
                             E::Warning(msg) => {

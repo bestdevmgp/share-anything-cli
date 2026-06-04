@@ -20,6 +20,11 @@ pub struct DownloadItem {
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct FileDetail {
+    /// ULID for this file row in the share. Empty when the server is older than the
+    /// multi-file download patch — callers must fall back to single-file behaviour
+    /// (server picks `files[0]` when `file_id` is omitted) if any id is empty.
+    #[serde(default)]
+    pub id: String,
     pub file_name: String,
     pub file_size: i64,
 }
@@ -72,6 +77,28 @@ pub async fn delete_share(client: &ApiClient, code: &str) -> Result<(), CoreErro
         return Err(api_error(resp).await);
     }
     Ok(())
+}
+
+/// Result of a bulk delete: number of shares deleted, and any individual errors collected.
+pub struct DeleteAllOutcome {
+    pub deleted: usize,
+    pub failures: Vec<(String, String)>,
+}
+
+pub async fn delete_all_shares(client: &ApiClient) -> Result<DeleteAllOutcome, CoreError> {
+    if !client.is_authenticated() {
+        return Err(CoreError::Unauthenticated);
+    }
+    let uploads = list_my_uploads(client).await?;
+    let mut deleted = 0;
+    let mut failures: Vec<(String, String)> = Vec::new();
+    for u in &uploads {
+        match delete_share(client, &u.share_code).await {
+            Ok(()) => deleted += 1,
+            Err(e) => failures.push((u.share_code.clone(), e.to_string())),
+        }
+    }
+    Ok(DeleteAllOutcome { deleted, failures })
 }
 
 #[derive(Deserialize)]

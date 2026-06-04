@@ -198,6 +198,15 @@ pub async fn run(
 
         on_event(SenderEvent::PeerMatched { device_info: matched_device_info });
 
+        // The outer wait loop consumes one signaling message at a time until PeerMatched,
+        // but any messages that arrived AFTER PeerMatched (e.g. late ICE candidates from
+        // the previous file's receiver pc) are still queued and would otherwise be added
+        // to the fresh pc's ICE table by the 'negotiation loop — at best wasted checks,
+        // at worst the new pc's ICE locks onto a stale endpoint. Drain anything that
+        // piled up before we send the new file's Offer; nothing for this file can be in
+        // the queue yet since the Offer hasn't gone out.
+        while sig.try_recv().is_some() {}
+
         // file_name may be None for single-file shares; fall back to the first file.
         let file_to_send: &PreparedFile = match &matched_file_name {
             Some(name) => prepared
@@ -231,9 +240,19 @@ pub async fn run(
 
         // `transfer_succeeded` tells the Disconnected branch apart from an
         // expected post-transfer disconnect vs a mid-flight drop.
+        //
+        // Negotiation stall guard: ICE typically completes within seconds (≤15s even on
+        // a TURN-only relay). Reset on every signaling message, ICE candidate, or state
+        // change. If everything goes silent for `NEGOTIATION_STALL_TIMEOUT` we abort
+        // rather than wedge — e.g. when a stale signaling registration leaves the
+        // backend with no downloader to relay the Answer to.
+        const NEGOTIATION_STALL_TIMEOUT: std::time::Duration =
+            std::time::Duration::from_secs(60);
+        let mut deadline = tokio::time::Instant::now() + NEGOTIATION_STALL_TIMEOUT;
         let transfer_succeeded = 'negotiation: loop {
             tokio::select! {
                 Some(msg) = sig.recv() => {
+                    deadline = tokio::time::Instant::now() + NEGOTIATION_STALL_TIMEOUT;
                     match msg {
                         SignalingMessage::Answer { sdp, .. } => {
                             let answer = RTCSessionDescription::answer(sdp)
@@ -274,6 +293,7 @@ pub async fn run(
                     }
                 }
                 Some(candidate) = ice_rx.recv() => {
+                    deadline = tokio::time::Instant::now() + NEGOTIATION_STALL_TIMEOUT;
                     let encoded = encode_ice_candidate(
                         &candidate.candidate,
                         &candidate.sdp_mid,
@@ -289,6 +309,7 @@ pub async fn run(
                     .map_err(|e| CoreError::P2P(e.to_string()))?;
                 }
                 Some(state) = state_rx.recv() => {
+                    deadline = tokio::time::Instant::now() + NEGOTIATION_STALL_TIMEOUT;
                     match state {
                         RTCIceConnectionState::Connected => {
                             if rtc::check_relay(&pc).await {
@@ -307,6 +328,12 @@ pub async fn run(
                         }
                         _ => {}
                     }
+                }
+                _ = tokio::time::sleep_until(deadline) => {
+                    return Err(CoreError::P2P(format!(
+                        "ICE negotiation stalled (no progress for {}s)",
+                        NEGOTIATION_STALL_TIMEOUT.as_secs()
+                    )));
                 }
                 else => break 'negotiation false,
             }

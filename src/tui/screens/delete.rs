@@ -10,9 +10,13 @@ pub enum Phase {
     Failed(String),
 }
 
+pub enum Target {
+    Single { code: String, file_name: String },
+    All { count: usize },
+}
+
 pub struct State {
-    pub code: String,
-    pub file_name: String,
+    pub target: Target,
     pub phase: Phase,
     pub choice: ConfirmChoice,
 }
@@ -20,8 +24,15 @@ pub struct State {
 impl State {
     pub fn new(code: String, file_name: String) -> Self {
         Self {
-            code,
-            file_name,
+            target: Target::Single { code, file_name },
+            phase: Phase::Awaiting,
+            choice: ConfirmChoice::Yes,
+        }
+    }
+
+    pub fn new_all(count: usize) -> Self {
+        Self {
+            target: Target::All { count },
             phase: Phase::Awaiting,
             choice: ConfirmChoice::Yes,
         }
@@ -67,41 +78,93 @@ fn start_delete(s: &mut State, ctx: &mut AppCtx) -> ScreenAction {
         return ScreenAction::Stay;
     };
     let client = ctx.client.clone();
-    let code = s.code.clone();
     s.phase = Phase::Deleting;
-    let handle = tokio::spawn(async move {
-        let r = crate::core::shares::delete_share(&client, &code).await;
-        // Send the code back so the app can locate and remove the row.
-        let _ = tx.send(Event::DeleteFinished(r.map(|()| code)));
-    });
-    ctx.tasks.push(handle.abort_handle());
+    match &s.target {
+        Target::Single { code, .. } => {
+            let code = code.clone();
+            let handle = tokio::spawn(async move {
+                let r = crate::core::shares::delete_share(&client, &code).await;
+                let _ = tx.send(Event::DeleteFinished(r.map(|()| code)));
+            });
+            ctx.tasks.push(handle.abort_handle());
+        }
+        Target::All { .. } => {
+            let handle = tokio::spawn(async move {
+                let r = crate::core::shares::delete_all_shares(&client).await;
+                let _ = tx.send(Event::DeleteAllFinished(r));
+            });
+            ctx.tasks.push(handle.abort_handle());
+        }
+    }
     ScreenAction::Stay
 }
 
 pub fn render(s: &State, f: &mut Frame) {
     let area = f.area();
     match &s.phase {
-        Phase::Awaiting => {
-            let msg = format!("Delete share \"{}\" ({})?", s.file_name, s.code);
-            crate::tui::widgets::confirm::render(f, area, "Confirm delete", &msg, s.choice);
-        }
+        Phase::Awaiting => match &s.target {
+            Target::Single { code, file_name } => {
+                let msg = format!("Delete share \"{}\" ({})?", file_name, code);
+                crate::tui::widgets::confirm::render(f, area, "Confirm delete", &msg, s.choice);
+            }
+            Target::All { count } => {
+                let msg = format!(
+                    "Delete ALL {} shares?\nDownloaders will no longer be able to fetch them.",
+                    count
+                );
+                crate::tui::widgets::confirm::render(f, area, "Delete all shares", &msg, s.choice);
+            }
+        },
         Phase::Deleting => {
-            crate::tui::widgets::confirm::render(
-                f,
-                area,
-                "Deleting\u{2026}",
-                &format!("Deleting {}…", s.code),
-                s.choice,
-            );
+            let msg = match &s.target {
+                Target::Single { code, .. } => format!("Deleting {}…", code),
+                Target::All { count } => format!("Deleting {} shares…", count),
+            };
+            render_status_box(f, area, "Deleting\u{2026}", &msg, None);
         }
         Phase::Failed(err) => {
-            crate::tui::widgets::confirm::render(
+            render_status_box(
                 f,
                 area,
                 "Delete failed",
                 &format!("{}\n\n[Enter] back", err),
-                s.choice,
+                None,
             );
         }
     }
+}
+
+/// Bordered status box without yes/no buttons. Used for transient (Deleting) and terminal
+/// (Failed) states where the confirm widget's button row would be misleading.
+fn render_status_box(
+    f: &mut Frame,
+    area: ratatui::layout::Rect,
+    title: &str,
+    message: &str,
+    _placeholder: Option<()>,
+) {
+    use ratatui::{
+        layout::Rect,
+        style::{Modifier, Style},
+        text::{Line, Span},
+        widgets::{Block, Borders, Paragraph, Wrap},
+    };
+    let width = std::cmp::min(area.width, 60);
+    let lines: Vec<Line> = std::iter::once(Line::from(""))
+        .chain(message.split('\n').map(|p| Line::from(format!(" {}", p))))
+        .collect();
+    let needed: u16 = (lines.len() as u16 + 2).min(area.height); // borders top/bottom
+    let x = area.x + area.width.saturating_sub(width) / 2;
+    let y = area.y + area.height.saturating_sub(needed) / 2;
+    let box_area = Rect { x, y, width, height: needed };
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(Span::styled(
+            format!(" {} ", title),
+            Style::default().add_modifier(Modifier::BOLD),
+        ));
+    let inner = block.inner(box_area);
+    f.render_widget(block, box_area);
+    f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
 }

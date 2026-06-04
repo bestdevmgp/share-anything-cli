@@ -28,21 +28,67 @@ pub struct SecureFileState {
     pub started_at: Option<std::time::Instant>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModeChoice {
+    Each,
+    Zip,
+}
+
+impl ModeChoice {
+    fn toggle(self) -> Self {
+        match self {
+            ModeChoice::Each => ModeChoice::Zip,
+            ModeChoice::Zip => ModeChoice::Each,
+        }
+    }
+}
+
 #[allow(clippy::large_enum_variant)]
 pub enum Phase {
     InputCode { code: TextArea<'static> },
     FetchingInfo { code: String },
-    NeedsPassword { info: FileInfo, password: TextArea<'static> },
+    NeedsPassword {
+        info: FileInfo,
+        password: TextArea<'static>,
+        /// Inline error shown in red below the password field. Set by the verify
+        /// callback when the previous attempt was wrong; cleared the moment the user
+        /// edits the field so the warning doesn't linger after a correction.
+        error: Option<String>,
+    },
+    /// `POST /file/verify-password` in flight. The password is held so we can stuff it
+    /// into `ChoosePath` once the server confirms it, without making the user retype.
+    VerifyingPassword { info: FileInfo, password: String },
+    /// Server confirmed the password. We linger here for a short beat so the user sees
+    /// the success state in the same spot where `Verifying password...` was spinning,
+    /// then auto-advance to `ChoosePath`.
+    PasswordVerified { info: FileInfo, password: String },
     ChoosePath {
         info: FileInfo,
         password: Option<String>,
         picker: PathPicker,
+        /// Each vs Zip toggle. Meaningful only when `info.files.len() > 1` and this is
+        /// not a P2P transfer; otherwise the renderer hides the toggle and Enter just
+        /// downloads.
+        mode: ModeChoice,
     },
     Running {
         info: FileInfo,
         received: u64,
         total: u64,
         target_display: String,
+        started_at: std::time::Instant,
+    },
+    /// "Save each" path: sequentially fetch every file in the share into the chosen
+    /// directory. Tracks per-file progress so the UI can render the active filename
+    /// independently of the cumulative bar.
+    RunningEach {
+        info: FileInfo,
+        current_idx: usize,
+        file_received: u64,
+        file_total: u64,
+        total_received: u64,
+        total_total: u64,
+        saved_files: Vec<PathBuf>,
         started_at: std::time::Instant,
     },
     SecureRunning {
@@ -56,6 +102,7 @@ pub enum Phase {
         saved_files: Vec<PathBuf>,
     },
     Done { saved: PathBuf },
+    DoneEach { saved_files: Vec<PathBuf> },
     SecureDone { saved_files: Vec<PathBuf>, log: Vec<String> },
     Failed(String),
 }
@@ -94,13 +141,9 @@ impl PathPicker {
         Self { cwd, entries, cursor: 0 }
     }
 
-    /// Row layout: 0 = "Save here", 1 = ".." (if cwd has a parent), 2.. = subdirs.
-    fn has_parent(&self) -> bool {
-        self.cwd.parent().is_some()
-    }
-
+    /// Row layout: 0 = "Save here", 1.. = subdirs. Parent navigation is keyboard-only (←/h).
     fn rows_len(&self) -> usize {
-        1 + (if self.has_parent() { 1 } else { 0 }) + self.entries.len()
+        1 + self.entries.len()
     }
 
     fn move_cursor(&mut self, delta: i32) {
@@ -180,37 +223,67 @@ pub fn update(s: &mut State, ev: &Event, ctx: &mut AppCtx) -> ScreenAction {
         Phase::FetchingInfo { .. } => {
             ScreenAction::Stay
         }
-        Phase::NeedsPassword { password, .. } => {
+        Phase::NeedsPassword { password, error, .. } => {
             let Event::Key(k) = ev else { return ScreenAction::Stay; };
             match k.code {
                 KeyCode::Esc => ScreenAction::Pop,
                 KeyCode::Enter => {
                     let pw = password.lines().join("");
                     if pw.is_empty() {
-                        *ctx.toast = Some(crate::tui::widgets::toast::Toast::warn(
-                            "Password required.",
-                        ));
+                        *error = Some("Password required.".into());
                         return ScreenAction::Stay;
                     }
-                    if let Phase::NeedsPassword { info, password: _ } =
+                    let Some(tx) = ctx.tx.cloned() else {
+                        s.phase = Phase::Failed("Internal error: event channel not ready.".into());
+                        return ScreenAction::Stay;
+                    };
+                    if let Phase::NeedsPassword { info, password: _, error: _ } =
                         std::mem::replace(&mut s.phase, Phase::Failed("Internal state error.".into()))
                     {
-                        s.phase = Phase::ChoosePath {
-                            info,
-                            password: Some(pw),
-                            picker: PathPicker::new(),
-                        };
+                        let client = ctx.client.clone();
+                        let code_for_task = info.share_code.clone();
+                        let pw_for_task = pw.clone();
+                        let handle = tokio::spawn(async move {
+                            let r = crate::core::download::verify_password(
+                                &client,
+                                &code_for_task,
+                                &pw_for_task,
+                            )
+                            .await;
+                            let _ = tx.send(Event::DownloadPasswordVerified(r));
+                        });
+                        ctx.tasks.push(handle.abort_handle());
+                        s.phase = Phase::VerifyingPassword { info, password: pw };
                     }
                     ScreenAction::Stay
                 }
                 _ => {
+                    *error = None;
                     password.input(event::ev_to_input(k));
                     ScreenAction::Stay
                 }
             }
         }
-        Phase::ChoosePath { picker, .. } => {
+        Phase::VerifyingPassword { .. } => {
+            // Block all input while the verify request is in flight — Esc still pops the
+            // screen so the user is never stuck. The pending task's abort handle is in
+            // `ctx.tasks` so it gets cancelled with the screen.
+            if let Event::Key(k) = ev {
+                if k.code == KeyCode::Esc {
+                    return ScreenAction::Pop;
+                }
+            }
+            ScreenAction::Stay
+        }
+        Phase::PasswordVerified { .. } => {
+            // Brief success state before the auto-transition fires. Swallow all keys so
+            // a stray Enter can't accidentally pop the screen during the linger.
+            ScreenAction::Stay
+        }
+        Phase::ChoosePath { picker, mode, info, .. } => {
             let Event::Key(k) = ev else { return ScreenAction::Stay; };
+            // Mode toggle is only meaningful when the user has a real choice.
+            let toggle_visible = info.files.len() > 1 && info.transfer_type.as_deref() != Some("p2p");
             match k.code {
                 KeyCode::Esc | KeyCode::Char('q') => ScreenAction::Pop,
                 KeyCode::Up | KeyCode::Char('k') => { picker.move_cursor(-1); ScreenAction::Stay }
@@ -219,26 +292,45 @@ pub fn update(s: &mut State, ev: &Event, ctx: &mut AppCtx) -> ScreenAction {
                     picker.parent();
                     ScreenAction::Stay
                 }
-                KeyCode::Enter | KeyCode::Char('l') | KeyCode::Right => {
-                    let parent_row = if picker.has_parent() { 1 } else { usize::MAX };
+                KeyCode::Tab | KeyCode::BackTab if toggle_visible => {
+                    *mode = mode.toggle();
+                    ScreenAction::Stay
+                }
+                KeyCode::Char('e') | KeyCode::Char('E') if toggle_visible => {
+                    *mode = ModeChoice::Each;
+                    ScreenAction::Stay
+                }
+                KeyCode::Char('z') | KeyCode::Char('Z') if toggle_visible => {
+                    *mode = ModeChoice::Zip;
+                    ScreenAction::Stay
+                }
+                KeyCode::Enter => {
                     if picker.cursor == 0 {
                         let dir = picker.cwd.clone();
-                        start_download(s, dir, ctx)
-                    } else if picker.cursor == parent_row {
-                        picker.parent();
-                        ScreenAction::Stay
+                        enter_save_path(s, dir, ctx)
                     } else {
-                        let entry_idx = picker.cursor.saturating_sub(if picker.has_parent() { 2 } else { 1 });
+                        let entry_idx = picker.cursor - 1;
                         if let Some(target) = picker.entries.get(entry_idx).cloned() {
                             picker.navigate(target);
                         }
                         ScreenAction::Stay
                     }
                 }
+                KeyCode::Right | KeyCode::Char('l') => {
+                    // Right arrow / l = "enter directory" only. Save here is Enter-only so a
+                    // stray right arrow can't commit the download to the wrong location.
+                    if picker.cursor > 0 {
+                        let entry_idx = picker.cursor - 1;
+                        if let Some(target) = picker.entries.get(entry_idx).cloned() {
+                            picker.navigate(target);
+                        }
+                    }
+                    ScreenAction::Stay
+                }
                 _ => ScreenAction::Stay,
             }
         }
-        Phase::Running { .. } | Phase::SecureRunning { .. } => ScreenAction::Stay,
+        Phase::Running { .. } | Phase::RunningEach { .. } | Phase::SecureRunning { .. } => ScreenAction::Stay,
         Phase::Done { .. } => {
             let Event::Key(k) = ev else { return ScreenAction::Stay; };
             if matches!(k.code, KeyCode::Enter | KeyCode::Esc | KeyCode::Char('q') | KeyCode::Left | KeyCode::Char('b')) {
@@ -250,6 +342,29 @@ pub fn update(s: &mut State, ev: &Event, ctx: &mut AppCtx) -> ScreenAction {
                     };
                     ctx.stdout_lines.push("Download complete!".into());
                     ctx.stdout_lines.push(format!("  Saved to: {}", display));
+                }
+                ScreenAction::PopToRoot
+            } else {
+                ScreenAction::Stay
+            }
+        }
+        Phase::DoneEach { .. } => {
+            let Event::Key(k) = ev else { return ScreenAction::Stay; };
+            if matches!(k.code, KeyCode::Enter | KeyCode::Esc | KeyCode::Char('q') | KeyCode::Left | KeyCode::Char('b')) {
+                if let Phase::DoneEach { saved_files } = &s.phase {
+                    ctx.stdout_lines.push(format!(
+                        "Download complete! Saved {} file{}.",
+                        saved_files.len(),
+                        if saved_files.len() == 1 { "" } else { "s" },
+                    ));
+                    for p in saved_files.iter() {
+                        let display = if p.is_relative() && !p.starts_with(".") {
+                            format!("./{}", p.display())
+                        } else {
+                            p.display().to_string()
+                        };
+                        ctx.stdout_lines.push(format!("  {}", display));
+                    }
                 }
                 ScreenAction::PopToRoot
             } else {
@@ -277,13 +392,36 @@ pub fn update(s: &mut State, ev: &Event, ctx: &mut AppCtx) -> ScreenAction {
     }
 }
 
-fn start_download(s: &mut State, output_dir: PathBuf, ctx: &mut AppCtx) -> ScreenAction {
+/// Called when the user presses Enter on "Save here" in `ChoosePath`. Routes directly to
+/// the right runner based on transfer type, file count, and the in-screen mode toggle.
+fn enter_save_path(s: &mut State, output_dir: PathBuf, ctx: &mut AppCtx) -> ScreenAction {
     let replaced = std::mem::replace(&mut s.phase, Phase::Failed("Internal state error.".into()));
-    let Phase::ChoosePath { info, password, picker: _ } = replaced else {
+    let Phase::ChoosePath { info, password, picker: _, mode } = replaced else {
         s.phase = Phase::Failed("Internal state error.".into());
         return ScreenAction::Stay;
     };
 
+    let is_p2p = info.transfer_type.as_deref() == Some("p2p");
+    let multi_server = !is_p2p && info.files.len() > 1;
+    if multi_server {
+        return match mode {
+            ModeChoice::Each => start_each(s, info, password, output_dir, ctx),
+            ModeChoice::Zip => start_zip(s, info, password, output_dir, ctx),
+        };
+    }
+
+    start_single_or_p2p(s, info, password, output_dir, ctx)
+}
+
+/// Single-stream path: either P2P secure transfer or a single-file server download. The
+/// existing `Running` phase handles both progress shapes.
+fn start_single_or_p2p(
+    s: &mut State,
+    info: FileInfo,
+    password: Option<String>,
+    output_dir: PathBuf,
+    ctx: &mut AppCtx,
+) -> ScreenAction {
     if info.transfer_type.as_deref() == Some("p2p") {
         let share_code = info.share_code.clone();
         let total: u64 = info.files.iter().map(|f| f.file_size.max(0) as u64).sum();
@@ -386,26 +524,164 @@ fn start_download(s: &mut State, output_dir: PathBuf, ctx: &mut AppCtx) -> Scree
     ScreenAction::Stay
 }
 
+/// Save-each path: spawn one task that loops through `info.files` calling
+/// `download_share` per file. Emits `DownloadProgress` for byte counts and
+/// `DownloadEachAdvance` after each file completes; the final result lands as
+/// `DownloadEachFinished` for the success/failure transition.
+fn start_each(
+    s: &mut State,
+    info: FileInfo,
+    password: Option<String>,
+    output_dir: PathBuf,
+    ctx: &mut AppCtx,
+) -> ScreenAction {
+    let Some(tx) = ctx.tx.cloned() else {
+        s.phase = Phase::Failed("Internal error: event channel not ready.".into());
+        return ScreenAction::Stay;
+    };
+
+    let code = info.share_code.clone();
+    let total_total: u64 = info.files.iter().map(|f| f.file_size.max(0) as u64).sum();
+    let file_total = info.files[0].file_size.max(0) as u64;
+
+    let client = ctx.client.clone();
+    let info_for_task = info.clone();
+    let tx_for_progress = tx.clone();
+    let on_progress: crate::core::ProgressFn = std::sync::Arc::new(move |n: u64| {
+        let _ = tx_for_progress.send(Event::DownloadProgress { delta: n });
+    });
+
+    let handle = tokio::spawn(async move {
+        let mut saved: Vec<PathBuf> = Vec::with_capacity(info_for_task.files.len());
+        for (idx, f) in info_for_task.files.iter().enumerate() {
+            let opts = crate::core::download::DownloadOptions {
+                password: password.clone(),
+                file_id: Some(f.id.clone()),
+            };
+            let r = crate::core::download::download_share(
+                &client,
+                &code,
+                &info_for_task,
+                opts,
+                &output_dir,
+                on_progress.clone(),
+            )
+            .await;
+            match r {
+                Ok(path) => {
+                    saved.push(path.clone());
+                    // Only emit advance between files — the final completion goes through
+                    // DownloadEachFinished so the Done transition is unambiguous.
+                    if idx + 1 < info_for_task.files.len() {
+                        let _ = tx.send(Event::DownloadEachAdvance { idx, saved: path });
+                    }
+                }
+                Err(e) => {
+                    let _ = tx.send(Event::DownloadEachFinished(Err(e)));
+                    return;
+                }
+            }
+        }
+        let _ = tx.send(Event::DownloadEachFinished(Ok(saved)));
+    });
+    ctx.tasks.push(handle.abort_handle());
+
+    s.phase = Phase::RunningEach {
+        info,
+        current_idx: 0,
+        file_received: 0,
+        file_total,
+        total_received: 0,
+        total_total,
+        saved_files: vec![],
+        started_at: std::time::Instant::now(),
+    };
+    ScreenAction::Stay
+}
+
+/// ZIP path: single POST to /download/bulk, save the streamed archive as `{code}.zip`.
+fn start_zip(
+    s: &mut State,
+    info: FileInfo,
+    password: Option<String>,
+    output_dir: PathBuf,
+    ctx: &mut AppCtx,
+) -> ScreenAction {
+    let Some(tx) = ctx.tx.cloned() else {
+        s.phase = Phase::Failed("Internal error: event channel not ready.".into());
+        return ScreenAction::Stay;
+    };
+
+    let code = info.share_code.clone();
+    // ZIP content-length is unknown ahead of time — use sum of file sizes as a rough cap so
+    // the gauge has a sensible denominator. (Real ZIP slightly differs by header overhead.)
+    let target_total: u64 = info.files.iter().map(|f| f.file_size.max(0) as u64).sum();
+    let target_display = format!("{}.zip", code);
+    let file_ids: Vec<String> = info.files.iter().map(|f| f.id.clone()).collect();
+
+    let client = ctx.client.clone();
+    let tx_for_progress = tx.clone();
+    let on_progress: crate::core::ProgressFn = std::sync::Arc::new(move |n: u64| {
+        let _ = tx_for_progress.send(Event::DownloadProgress { delta: n });
+    });
+
+    let handle = tokio::spawn(async move {
+        let r = crate::core::download::download_bulk_zip(
+            &client,
+            &code,
+            &file_ids,
+            password.as_deref(),
+            &output_dir,
+            on_progress,
+        )
+        .await;
+        let _ = tx.send(Event::DownloadFinished(r));
+    });
+    ctx.tasks.push(handle.abort_handle());
+
+    s.phase = Phase::Running {
+        info,
+        received: 0,
+        total: target_total,
+        target_display,
+        started_at: std::time::Instant::now(),
+    };
+    ScreenAction::Stay
+}
+
 pub fn render(s: &State, f: &mut Frame) {
     let area = f.area();
     match &s.phase {
         Phase::InputCode { code } => render_input_code(f, area, code),
         Phase::FetchingInfo { code } => render_fetching(f, area, code),
-        Phase::NeedsPassword { info, password } => render_password(f, area, info, password),
-        Phase::ChoosePath { info, picker, .. } => render_choose_path(f, area, info, picker),
+        Phase::NeedsPassword { info, password, error } => {
+            render_password(f, area, info, password, error.as_deref())
+        }
+        Phase::VerifyingPassword { info, .. } => render_verifying_password(f, area, info),
+        Phase::PasswordVerified { info, .. } => render_password_verified(f, area, info),
+        Phase::ChoosePath { info, picker, mode, .. } => {
+            render_choose_path(f, area, info, picker, *mode)
+        }
         Phase::Running { info, received, total, target_display, started_at } => {
             render_running(f, area, info, *received, *total, target_display, *started_at)
+        }
+        Phase::RunningEach { info, current_idx, file_received, file_total, total_received, total_total, started_at, .. } => {
+            render_running_each(
+                f, area, info, *current_idx, *file_received, *file_total,
+                *total_received, *total_total, *started_at,
+            )
         }
         Phase::SecureRunning { share_code, connected_info, file_states, active_idx, started_at, log, .. } => {
             render_secure_running_dl(f, area, share_code, connected_info.as_deref(), file_states, *active_idx, *started_at, log);
         }
         Phase::Done { saved } => render_done(f, area, saved),
+        Phase::DoneEach { saved_files } => render_done_each(f, area, saved_files),
         Phase::SecureDone { saved_files, log } => render_secure_done_dl(f, area, saved_files, log),
         Phase::Failed(msg) => render_failed(f, area, msg),
     }
 }
 
-fn card(f: &mut Frame, area: Rect, title: &str, accent: Color) -> Rect {
+pub(crate) fn card(f: &mut Frame, area: Rect, title: &str, accent: Color) -> Rect {
     let outer = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(accent))
@@ -430,7 +706,7 @@ fn hints(f: &mut Frame, area: Rect, text: &str) {
     );
 }
 
-fn render_info_bar(f: &mut Frame, area: Rect, info: &FileInfo) {
+pub(crate) fn render_info_bar(f: &mut Frame, area: Rect, info: &FileInfo) {
     let is_p2p = info.transfer_type.as_deref() == Some("p2p");
     let mut spans: Vec<Span> = vec![];
     let chip = |label: &str, val: &str, c: Color| -> Vec<Span<'static>> {
@@ -470,40 +746,77 @@ fn section_header(text: impl Into<String>) -> Line<'static> {
     ))
 }
 
-fn render_files_section(f: &mut Frame, area: Rect, info: &FileInfo) {
-    let mut lines: Vec<Line> = Vec::with_capacity(info.files.len() + 1);
+/// Truncates the visible file list to `area.height` and surfaces the dropped count with a
+/// "+N more" line. Used by the download `ChoosePath` screen so a share with many files
+/// can't squeeze the path picker out of view.
+fn render_files_section_capped(f: &mut Frame, area: Rect, info: &FileInfo) {
+    let cap = area.height as usize;
+    if cap == 0 { return; }
+
+    let mut lines: Vec<Line> = Vec::with_capacity(cap);
     lines.push(section_header(format!("Files ({})", info.files.len())));
-    for fd in &info.files {
+
+    let visible_rows = cap.saturating_sub(1);
+    let total = info.files.len();
+    let need_more_line = total > visible_rows;
+    let shown = if need_more_line { visible_rows.saturating_sub(1) } else { total };
+    let visible_files = &info.files[..shown.min(total)];
+
+    let max_size_w = visible_files
+        .iter()
+        .map(|fd| crate::format::format_size(fd.file_size).len())
+        .max()
+        .unwrap_or(0);
+
+    const PREFIX_W: usize = 3;
+    const GAP_W: usize = 2;
+    let avail = (area.width as usize).saturating_sub(PREFIX_W + GAP_W + max_size_w);
+    let name_w = avail.max(5);
+
+    for fd in visible_files.iter() {
+        let size_str = crate::format::format_size(fd.file_size);
+        let size_left_pad = max_size_w.saturating_sub(size_str.len());
+        let name_truncated = crate::format::truncate_display(&fd.file_name, name_w);
+        let name_padded = crate::format::pad_display(&name_truncated, name_w);
+
         lines.push(Line::from(vec![
             Span::styled(" \u{2022} ", Style::default().fg(Color::Cyan)),
-            Span::raw(fd.file_name.clone()),
-            Span::styled(
-                format!("    {}", crate::format::format_size(fd.file_size)),
-                Style::default().fg(Color::DarkGray),
-            ),
+            Span::raw(name_padded),
+            Span::raw(" ".repeat(GAP_W + size_left_pad)),
+            Span::styled(size_str, Style::default().fg(Color::DarkGray)),
         ]));
+    }
+    if need_more_line {
+        lines.push(Line::from(Span::styled(
+            "   \u{2026}",
+            Style::default().fg(Color::DarkGray),
+        )));
     }
     f.render_widget(Paragraph::new(lines), area);
 }
 
 fn render_input_code(f: &mut Frame, area: Rect, code: &TextArea) {
-    let inner = card(f, area, "Download", Color::Cyan);
-
     let chunks = Layout::vertical([
-        Constraint::Length(1),
-        Constraint::Length(2),
-        Constraint::Length(3),
         Constraint::Min(0),
         Constraint::Length(1),
     ])
-    .split(inner);
+    .split(area);
+    let body = chunks[0];
+
+    let input_width = std::cmp::min(body.width, 28);
+    let input_height: u16 = 3;
+    let x = body.x + body.width.saturating_sub(input_width) / 2;
+    let y = body.y + 2;
+    let input_area = Rect { x, y, width: input_width, height: input_height };
+    let above = Rect { x: body.x, y: body.y, width: body.width, height: 2 };
 
     f.render_widget(
-        Paragraph::new("Enter a share code to download."),
-        chunks[1],
+        Paragraph::new(" Enter a share code:")
+            .style(Style::default().fg(Color::DarkGray)),
+        above,
     );
-    f.render_widget(code, chunks[2]);
-    hints(f, chunks[4], "[Enter] fetch info    [Esc] back");
+    f.render_widget(code, input_area);
+    hints(f, chunks[1], " [Enter] fetch info    [Esc] back ");
 }
 
 fn render_fetching(f: &mut Frame, area: Rect, code: &str) {
@@ -527,7 +840,77 @@ fn render_fetching(f: &mut Frame, area: Rect, code: &str) {
     );
 }
 
-fn render_password(f: &mut Frame, area: Rect, info: &FileInfo, password: &TextArea) {
+fn render_password(
+    f: &mut Frame,
+    area: Rect,
+    info: &FileInfo,
+    password: &TextArea,
+    error: Option<&str>,
+) {
+    let inner = card(f, area, "Download", Color::Cyan);
+    let chunks = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(3),
+        Constraint::Length(1),
+        Constraint::Min(0),
+        Constraint::Length(1),
+    ])
+    .split(inner);
+    render_info_bar(f, chunks[1], info);
+    f.render_widget(password, chunks[3]);
+    if let Some(msg) = error {
+        f.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                format!(" {}", msg),
+                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+            ))),
+            chunks[4],
+        );
+    }
+    hints(f, chunks[6], "[Enter] continue    [Esc] back");
+}
+
+fn render_verifying_password(f: &mut Frame, area: Rect, info: &FileInfo) {
+    let inner = card(f, area, "Download", Color::Cyan);
+    let chunks = Layout::vertical([
+        Constraint::Length(1),       // 0 spacer
+        Constraint::Length(1),       // 1 info bar
+        Constraint::Length(1),       // 2 spacer (matches render_password)
+        Constraint::Length(3),       // 3 verifying box (same height as the password input)
+        Constraint::Min(0),
+        Constraint::Length(1),       // hints
+    ])
+    .split(inner);
+    render_info_bar(f, chunks[1], info);
+    // Center the spinner line vertically inside the 3-row box so it sits on the same
+    // baseline as the password input would.
+    let centered = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+    ])
+    .split(chunks[3]);
+    f.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::raw(" "),
+            Span::styled(
+                spinner_frame(),
+                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+            ),
+            Span::raw("  "),
+            Span::raw("Verifying password..."),
+        ])),
+        centered[1],
+    );
+    hints(f, chunks[5], "[Esc] cancel");
+}
+
+/// Same layout footprint as `render_verifying_password` — we just swap the spinner line
+/// for the green success indicator so it stays in the exact position the spinner
+/// occupied. Held briefly before auto-advancing to `ChoosePath`.
+fn render_password_verified(f: &mut Frame, area: Rect, info: &FileInfo) {
     let inner = card(f, area, "Download", Color::Cyan);
     let chunks = Layout::vertical([
         Constraint::Length(1),
@@ -539,100 +922,165 @@ fn render_password(f: &mut Frame, area: Rect, info: &FileInfo, password: &TextAr
     ])
     .split(inner);
     render_info_bar(f, chunks[1], info);
-    f.render_widget(password, chunks[3]);
-    hints(f, chunks[5], "[Enter] continue    [Esc] back");
+    let centered = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+    ])
+    .split(chunks[3]);
+    f.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::raw(" "),
+            Span::styled(
+                "\u{2713}",
+                Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
+            ),
+            Span::raw("  "),
+            Span::styled("Password verified", Style::default().fg(Color::Green)),
+        ])),
+        centered[1],
+    );
+    hints(f, chunks[5], "");
 }
 
-fn render_choose_path(f: &mut Frame, area: Rect, info: &FileInfo, picker: &PathPicker) {
+fn render_choose_path(
+    f: &mut Frame,
+    area: Rect,
+    info: &FileInfo,
+    picker: &PathPicker,
+    mode: ModeChoice,
+) {
     let inner = card(f, area, "Download", Color::Cyan);
 
-    let files_h = info.files.len() as u16 + 1;
-    let pw_h: u16 = if info.has_password { 1 } else { 0 };
+    let toggle_visible = info.files.len() > 1 && info.transfer_type.as_deref() != Some("p2p");
+    let mode_h: u16 = if toggle_visible { 1 } else { 0 };
+    // Extra breathing room between the mode toggle and the Save path block — only when the
+    // toggle is actually rendered, otherwise we'd leave a dead gap above Save path.
+    let gap_h: u16 = if toggle_visible { 1 } else { 0 };
+    // Reserve at least 8 rows for the path picker so navigation stays usable even when the
+    // share has many files. The file list shrinks first; render_files_section then shows a
+    // "+N more" line if it had to drop entries.
+    const PICKER_MIN: u16 = 8;
+    // Soft cap on the file list. Even when the terminal is tall we don't want a long share
+    // to dominate the screen — `render_files_section_capped` will show "+N more" past this
+    // many rows (header + N-1 files). Chosen to leave headroom for the path picker on a
+    // standard 24-row terminal once `Download as` and its gap are accounted for.
+    const FILES_SOFT_CAP: u16 = 12;
+    let fixed_h: u16 = 1 + 1 + 1 + 1 + mode_h + gap_h + 1 + 1; // chunks 0,1,2,4,5,6,7,9
+    let want_files_h = info.files.len() as u16 + 1;
+    let max_files_h = inner.height.saturating_sub(fixed_h + PICKER_MIN);
+    let files_h = want_files_h
+        .min(max_files_h)
+        .min(FILES_SOFT_CAP)
+        .max(2);
+
     let chunks = Layout::vertical([
-        Constraint::Length(1),
-        Constraint::Length(1),
-        Constraint::Length(1),
-        Constraint::Length(files_h),
-        Constraint::Length(1),
-        Constraint::Length(pw_h),
-        Constraint::Length(1),
-        Constraint::Min(6),
-        Constraint::Length(1),
+        Constraint::Length(1),       // 0 spacer
+        Constraint::Length(1),       // 1 info bar
+        Constraint::Length(1),       // 2 spacer
+        Constraint::Length(files_h), // 3 file list
+        Constraint::Length(1),       // 4 spacer between file list and next section
+        Constraint::Length(mode_h),  // 5 mode toggle (0 if single-file)
+        Constraint::Length(gap_h),   // 6 gap between mode toggle and Save path
+        Constraint::Length(1),       // 7 "Save path" header
+        Constraint::Min(PICKER_MIN), // 8 picker
+        Constraint::Length(1),       // 9 hints
     ])
     .split(inner);
 
     render_info_bar(f, chunks[1], info);
-    render_files_section(f, chunks[3], info);
+    render_files_section_capped(f, chunks[3], info);
 
-    if info.has_password {
-        f.render_widget(
-            Paragraph::new(Line::from(vec![
-                Span::styled(
-                    " \u{2713}",
-                    Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
-                ),
-                Span::raw("  "),
-                Span::styled(
-                    "Password verified",
-                    Style::default().fg(Color::Green),
-                ),
-            ])),
-            chunks[5],
-        );
+    if toggle_visible {
+        render_mode_toggle(f, chunks[5], mode);
     }
 
-    f.render_widget(Paragraph::new(section_header("Save path")), chunks[6]);
-    render_picker(f, chunks[7], picker);
-    hints(f, chunks[8], "[\u{2191}\u{2193}] move    [Enter] open/save    [\u{232b}/h] up    [Esc] back");
+    f.render_widget(Paragraph::new(section_header("Save path")), chunks[7]);
+    render_picker(f, chunks[8], picker);
+    let hint_text = if toggle_visible {
+        " [\u{2191}\u{2193}] move  [\u{2190}/\u{2192}] dir  [Tab/e/z] format  [Enter] open/save  [Esc/q] back "
+    } else {
+        " [\u{2191}\u{2193}] move  [\u{2190}/\u{2192}] dir  [Enter] open/save  [Esc/q] back "
+    };
+    hints(f, chunks[9], hint_text);
+}
+
+/// One-line toggle showing both options and highlighting the selected one. Sits between
+/// the file list and the path picker so the user sees the mode they're committing to
+/// when they hit Enter on "Save here".
+fn render_mode_toggle(f: &mut Frame, area: Rect, mode: ModeChoice) {
+    let selected_style = Style::default()
+        .fg(Color::Black)
+        .bg(Color::Cyan)
+        .add_modifier(Modifier::BOLD);
+    let plain_style = Style::default().fg(Color::White);
+    let line = Line::from(vec![
+        Span::styled(" Download as  ", Style::default().fg(Color::DarkGray)),
+        Span::styled(
+            " [e] Each file ",
+            if mode == ModeChoice::Each { selected_style } else { plain_style },
+        ),
+        Span::raw("  "),
+        Span::styled(
+            " [z] ZIP bundle ",
+            if mode == ModeChoice::Zip { selected_style } else { plain_style },
+        ),
+    ]);
+    f.render_widget(Paragraph::new(line), area);
 }
 
 fn render_picker(f: &mut Frame, area: Rect, picker: &PathPicker) {
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Cyan))
-        .title(Line::from(vec![
-            Span::raw(" "),
-            Span::styled(
-                picker.cwd.display().to_string(),
-                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
-            ),
-            Span::raw(" "),
-        ]));
+        .title(format!(" {} ", picker.cwd.display()));
     let inner = block.inner(area);
     f.render_widget(block, area);
 
+    // Per-row cursor styling: Save here lights up cyan (its dedicated accent), directory
+    // rows just invert (the default file-picker highlight). We compose the styles by hand
+    // because `List::highlight_style` only takes one style for the whole list.
     let mut items: Vec<ListItem> = Vec::new();
-    let cwd_str = picker.cwd.display().to_string();
-    items.push(ListItem::new(Line::from(vec![
-        Span::styled("[\u{2713} Save here]", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
-        Span::raw("  "),
-        Span::styled(cwd_str, Style::default().fg(Color::DarkGray)),
-    ])));
-    if picker.has_parent() {
-        items.push(ListItem::new(Line::from(vec![
-            Span::styled("..", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
-            Span::raw("  "),
-            Span::styled("parent directory", Style::default().fg(Color::DarkGray)),
-        ])));
-    }
-    for entry in &picker.entries {
-        let name = entry.file_name()
-            .map(|n| n.to_string_lossy().to_string())
-            .unwrap_or_default();
-        items.push(ListItem::new(Line::from(vec![
-            Span::styled("\u{1f4c1} ", Style::default().fg(Color::Blue)),
-            Span::styled(name, Style::default().fg(Color::White)),
-            Span::styled("/", Style::default().fg(Color::DarkGray)),
-        ])));
+
+    let save_here_item = if picker.cursor == 0 {
+        ListItem::new("  \u{1f4c1} .  Save here").style(
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )
+    } else {
+        ListItem::new(Line::from(vec![
+            Span::raw("  \u{1f4c1} ."),
+            Span::styled("  Save here", Style::default().add_modifier(Modifier::BOLD)),
+        ]))
+    };
+    items.push(save_here_item);
+
+    if picker.entries.is_empty() {
+        items.push(ListItem::new(Line::from(Span::styled(
+            "  (no subfolders)",
+            Style::default().fg(Color::DarkGray),
+        ))));
+    } else {
+        for (i, entry) in picker.entries.iter().enumerate() {
+            let row_idx = i + 1;
+            let name = entry
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_default();
+            let item = ListItem::new(format!("  \u{1f4c1} {}", name));
+            let item = if row_idx == picker.cursor {
+                item.style(Style::default().add_modifier(Modifier::REVERSED))
+            } else {
+                item
+            };
+            items.push(item);
+        }
     }
 
-    let list = List::new(items)
-        .highlight_style(
-            Style::default()
-                .bg(Color::Cyan)
-                .fg(Color::Black)
-                .add_modifier(Modifier::BOLD),
-        );
+    // Keep state.select so ratatui scrolls the cursor row into view, but suppress its
+    // built-in highlight since we already painted the cursor row above.
+    let list = List::new(items).highlight_style(Style::default());
     let mut state = ListState::default();
     state.select(Some(picker.cursor));
     f.render_stateful_widget(list, inner, &mut state);
@@ -795,8 +1243,7 @@ fn render_secure_running_dl(
         Constraint::Length(2),
         Constraint::Length(3),
         Constraint::Length(files_block_h),
-        Constraint::Length(5),
-        Constraint::Min(0),
+        Constraint::Min(5),
         Constraint::Length(1),
     ])
     .split(area);
@@ -924,7 +1371,7 @@ fn render_secure_running_dl(
         chunks[3],
     );
 
-    hints(f, chunks[5], " [Ctrl+C] cancel ");
+    hints(f, chunks[4], " [Ctrl+C] cancel ");
 }
 
 fn render_secure_done_dl(f: &mut Frame, area: Rect, saved_files: &[PathBuf], log: &[String]) {
@@ -932,8 +1379,7 @@ fn render_secure_done_dl(f: &mut Frame, area: Rect, saved_files: &[PathBuf], log
     let chunks = Layout::vertical([
         Constraint::Length(2),
         Constraint::Length(files_block_height),
-        Constraint::Min(0),
-        Constraint::Length(5),
+        Constraint::Min(5),
         Constraint::Length(1),
     ])
     .split(area);
@@ -966,16 +1412,156 @@ fn render_secure_done_dl(f: &mut Frame, area: Rect, saved_files: &[PathBuf], log
     }
     f.render_widget(Paragraph::new(file_lines), chunks[1]);
 
-    let max_lines = chunks[3].height.saturating_sub(2) as usize;
+    let max_lines = chunks[2].height.saturating_sub(2) as usize;
     let start = log.len().saturating_sub(max_lines.max(1));
     let log_lines: Vec<Line> = log[start..].iter().map(|s| Line::from(s.as_str())).collect();
     f.render_widget(
         Paragraph::new(log_lines)
             .block(Block::default().borders(Borders::ALL).title(" Log ")),
-        chunks[3],
+        chunks[2],
     );
 
-    hints(f, chunks[4], " [Enter/b/\u{2190}] back ");
+    hints(f, chunks[3], " [Enter/Esc/q/b/\u{2190}] home ");
+}
+
+/// Per-file gauge + cumulative summary for the "save each" multi-file download path.
+#[allow(clippy::too_many_arguments)]
+fn render_running_each(
+    f: &mut Frame,
+    area: Rect,
+    info: &FileInfo,
+    current_idx: usize,
+    file_received: u64,
+    file_total: u64,
+    total_received: u64,
+    total_total: u64,
+    started_at: std::time::Instant,
+) {
+    let inner = card(f, area, "Downloading", Color::Cyan);
+    let chunks = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(3),
+        Constraint::Length(1),
+        Constraint::Length(3),
+        Constraint::Min(0),
+        Constraint::Length(1),
+    ])
+    .split(inner);
+
+    let total_files = info.files.len();
+    let current_name = info
+        .files
+        .get(current_idx)
+        .map(|f| f.file_name.clone())
+        .unwrap_or_default();
+    f.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled(
+                format!("({}/{}) ", current_idx + 1, total_files),
+                Style::default().fg(Color::DarkGray),
+            ),
+            Span::styled(current_name, Style::default().add_modifier(Modifier::BOLD)),
+            Span::styled(
+                format!("    code {}", info.share_code),
+                Style::default().fg(Color::DarkGray),
+            ),
+        ])),
+        chunks[1],
+    );
+
+    // Per-file gauge
+    let file_ratio = if file_total == 0 { 0.0 } else { (file_received as f64 / file_total as f64).min(1.0) };
+    let file_label = fmt_progress(file_received, file_total, started_at);
+    let file_gauge = Gauge::default()
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::DarkGray))
+                .title(" Current file "),
+        )
+        .gauge_style(Style::default().fg(Color::Cyan))
+        .ratio(file_ratio)
+        .label(file_label);
+    f.render_widget(file_gauge, chunks[3]);
+
+    // Overall gauge
+    let total_ratio = if total_total == 0 { 0.0 } else { (total_received as f64 / total_total as f64).min(1.0) };
+    let total_label = fmt_progress(total_received, total_total, started_at);
+    let total_gauge = Gauge::default()
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::DarkGray))
+                .title(" Overall "),
+        )
+        .gauge_style(Style::default().fg(Color::Green))
+        .ratio(total_ratio)
+        .label(total_label);
+    f.render_widget(total_gauge, chunks[5]);
+
+    hints(f, chunks[7], "[Ctrl+C] cancel");
+}
+
+fn render_done_each(f: &mut Frame, area: Rect, saved_files: &[PathBuf]) {
+    let inner = card(f, area, "Download complete", Color::Green);
+    let chunks = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Length(2),
+        Constraint::Min(0),
+        Constraint::Length(1),
+    ])
+    .split(inner);
+
+    f.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled(
+                "\u{2713}",
+                Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
+            ),
+            Span::raw("  "),
+            Span::styled(
+                format!(
+                    "{} file{} saved successfully",
+                    saved_files.len(),
+                    if saved_files.len() == 1 { "" } else { "s" },
+                ),
+                Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
+            ),
+        ])),
+        chunks[1],
+    );
+
+    // Cap the visible list to whatever fits in chunks[2] and surface dropped count.
+    let body_area = chunks[2];
+    let cap = body_area.height as usize;
+    let mut lines: Vec<Line> = Vec::with_capacity(cap.max(1));
+    lines.push(section_header("Saved files"));
+    let visible_rows = cap.saturating_sub(1);
+    let total = saved_files.len();
+    let need_more = total > visible_rows;
+    let shown = if need_more { visible_rows.saturating_sub(1) } else { total };
+    for p in saved_files.iter().take(shown) {
+        let display = if p.is_relative() && !p.starts_with(".") {
+            format!("./{}", p.display())
+        } else {
+            p.display().to_string()
+        };
+        lines.push(Line::from(vec![
+            Span::styled(" \u{2022} ", Style::default().fg(Color::Cyan)),
+            Span::raw(display),
+        ]));
+    }
+    if need_more {
+        lines.push(Line::from(Span::styled(
+            format!("   \u{2026} +{} more", total - shown),
+            Style::default().fg(Color::DarkGray),
+        )));
+    }
+    f.render_widget(Paragraph::new(lines), body_area);
+
+    hints(f, chunks[3], "[Enter/Esc/q/b/\u{2190}] home");
 }
 
 fn render_done(f: &mut Frame, area: Rect, saved: &Path) {
@@ -1017,7 +1603,7 @@ fn render_done(f: &mut Frame, area: Rect, saved: &Path) {
         chunks[2],
     );
 
-    hints(f, chunks[4], "[Enter/b/\u{2190}] back");
+    hints(f, chunks[4], "[Enter/Esc/q/b/\u{2190}] home");
 }
 
 fn render_failed(f: &mut Frame, area: Rect, msg: &str) {
@@ -1052,5 +1638,5 @@ fn render_failed(f: &mut Frame, area: Rect, msg: &str) {
         chunks[2],
     );
 
-    hints(f, chunks[3], "[Enter/b/\u{2190}] back");
+    hints(f, chunks[3], "[Enter/Esc/q/b/\u{2190}] try another code");
 }

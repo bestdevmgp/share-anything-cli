@@ -54,11 +54,13 @@ pub fn render(
     ])
     .split(inner);
 
-    let body = Paragraph::new(vec![
-        Line::from(""),
-        Line::from(format!(" {}", message)),
-    ])
-    .wrap(Wrap { trim: false });
+    // Split on '\n' so multi-line messages render as separate lines instead of being stuffed
+    // into one Line (where ratatui wraps but ignores the newline character).
+    let mut body_lines: Vec<Line> = vec![Line::from("")];
+    for piece in message.split('\n') {
+        body_lines.push(Line::from(format!(" {}", piece)));
+    }
+    let body = Paragraph::new(body_lines).wrap(Wrap { trim: false });
     f.render_widget(body, chunks[0]);
 
     let selected_style = Style::default()
@@ -112,7 +114,7 @@ mod tests {
             .collect();
         assert!(text.contains("Test"), "buffer should contain title 'Test'");
         assert!(text.contains("Message?"), "buffer should contain message");
-        assert!(text.contains("Yes"), "buffer should contain 'Yes'");
-        assert!(text.contains("No"), "buffer should contain 'No'");
+        assert!(text.contains("yes"), "buffer should contain 'yes' button");
+        assert!(text.contains("no"), "buffer should contain 'no' button");
     }
 }
