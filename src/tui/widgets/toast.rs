@@ -45,7 +45,7 @@ mod tests {
     #[test]
     fn toast_expires() {
         let mut t = Toast::info("hi");
-        t.ttl_ms = 1; // expire almost immediately
+        t.ttl_ms = 1;
         std::thread::sleep(Duration::from_millis(5));
         assert!(t.expired());
     }

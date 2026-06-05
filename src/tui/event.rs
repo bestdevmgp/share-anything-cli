@@ -8,11 +8,12 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 use tui_textarea::{Input, Key};
 
-#[allow(dead_code)]
 pub enum Event {
     Key(KeyEvent),
     Tick,
-    Resize(u16, u16),
+    /// Terminal resize notification. The new dimensions are not carried because consumers
+    /// rely on the next `terminal.draw` to pick up the new size via the backend.
+    Resize,
 
     UploadsLoaded(Result<Vec<UploadItem>, CoreError>),
     DownloadsLoaded(Result<Vec<DownloadItem>, CoreError>),
@@ -113,8 +114,8 @@ fn spawn_input_task(tx: Tx) {
                         break;
                     }
                 }
-                Ok(CtEvent::Resize(w, h)) => {
-                    if tx.send(Event::Resize(w, h)).is_err() {
+                Ok(CtEvent::Resize(_, _)) => {
+                    if tx.send(Event::Resize).is_err() {
                         break;
                     }
                 }

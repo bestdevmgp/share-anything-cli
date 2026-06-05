@@ -1471,7 +1471,6 @@ fn render_running_each(
         chunks[1],
     );
 
-    // Per-file gauge
     let file_ratio = if file_total == 0 { 0.0 } else { (file_received as f64 / file_total as f64).min(1.0) };
     let file_label = fmt_progress(file_received, file_total, started_at);
     let file_gauge = Gauge::default()
@@ -1486,7 +1485,6 @@ fn render_running_each(
         .label(file_label);
     f.render_widget(file_gauge, chunks[3]);
 
-    // Overall gauge
     let total_ratio = if total_total == 0 { 0.0 } else { (total_received as f64 / total_total as f64).min(1.0) };
     let total_label = fmt_progress(total_received, total_total, started_at);
     let total_gauge = Gauge::default()

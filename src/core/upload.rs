@@ -123,18 +123,18 @@ pub async fn upload_files(
     upload_via_presigned(client, files, opts, on_progress, on_phase).await
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 struct MultipartInitResponse {
     upload_session_id: String,
     share_code: String,
     files: Vec<MultipartFileInit>,
+    #[allow(dead_code)] // wire-protocol field; client uses local CHUNK_SIZE constant
     chunk_size: i64,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Deserialize, Clone)]
 struct MultipartFileInit {
+    #[allow(dead_code)] // server echoes file_name; client tracks names via FileEntry
     file_name: String,
     storage_key: String,
     upload_id: String,
@@ -146,7 +146,6 @@ struct PresignPartsResponse {
     urls: Vec<PartUrl>,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 struct PartUrl {
     part_number: i32,

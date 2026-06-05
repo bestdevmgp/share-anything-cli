@@ -5,10 +5,8 @@ fn timezone_abbr() -> String {
         .ok()
         .and_then(|tz| {
             let abbr = match tz.as_str() {
-                // UTC
                 "UTC" | "Etc/UTC" | "Etc/GMT" => "UTC",
 
-                // Asia
                 "Asia/Seoul" => "KST",
                 "Asia/Tokyo" => "JST",
                 "Asia/Shanghai" | "Asia/Chongqing" | "Asia/Harbin" | "Asia/Urumqi"
@@ -64,7 +62,6 @@ fn timezone_abbr() -> String {
                 "Asia/Dushanbe" => "TJT",
                 "Asia/Ashgabat" | "Asia/Ashkhabad" => "TMT",
 
-                // Americas
                 "America/New_York" | "US/Eastern" | "America/Detroit"
                 | "America/Kentucky/Louisville" | "America/Kentucky/Monticello"
                 | "America/Indiana/Indianapolis" | "America/Indiana/Vincennes"
@@ -142,7 +139,6 @@ fn timezone_abbr() -> String {
                 "America/Santo_Domingo" => "AST",
                 "America/Port-au-Prince" => "EST",
 
-                // Europe
                 "Europe/London" | "Europe/Belfast" | "Europe/Guernsey"
                 | "Europe/Isle_of_Man" | "Europe/Jersey" => "GMT",
                 "Europe/Dublin" => "GMT",
@@ -176,7 +172,6 @@ fn timezone_abbr() -> String {
                 "Atlantic/Cape_Verde" => "CVT",
                 "Atlantic/South_Georgia" => "GST",
 
-                // Africa
                 "Africa/Cairo" => "EET",
                 "Africa/Johannesburg" | "Africa/Harare"
                 | "Africa/Maputo" | "Africa/Lusaka"
@@ -202,7 +197,6 @@ fn timezone_abbr() -> String {
                 "Africa/Tripoli" => "EET",
                 "Africa/Khartoum" | "Africa/Juba" => "CAT",
 
-                // Oceania
                 "Australia/Sydney" | "Australia/Melbourne"
                 | "Australia/Hobart" | "Australia/Currie" => "AEST",
                 "Australia/Brisbane" | "Australia/Lindeman" => "AEST",
@@ -238,7 +232,6 @@ fn timezone_abbr() -> String {
                 "Pacific/Wallis" => "WFT",
                 "Pacific/Kiritimati" => "LINT",
 
-                // Indian Ocean
                 "Indian/Maldives" => "MVT",
                 "Indian/Mauritius" => "MUT",
                 "Indian/Reunion" => "RET",
