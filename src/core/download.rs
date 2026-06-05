@@ -1,9 +1,9 @@
 use crate::client::ApiClient;
 use crate::core::error::CoreError;
-use crate::core::shares::{api_error, FileInfo};
+use crate::core::shares::api_error;
 use crate::core::ProgressFn;
 use futures_util::StreamExt;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
 #[derive(Clone, Default)]
@@ -12,55 +12,99 @@ pub struct DownloadOptions {
     pub file_id: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+struct CliDownloadUrlResponse {
+    download_url: String,
+    file_id: String,
+    file_name: String,
+    file_size: i64,
+}
+
+#[derive(Debug, Serialize)]
+struct CliDownloadCompleteRequest<'a> {
+    file_id: &'a str,
+}
+
+/// Fetch from R2 with a client that does NOT carry our `X-Personal-Token` — the presigned
+/// URL is self-authenticating and we don't want the token landing in R2 access logs.
 pub async fn download_share(
     client: &ApiClient,
     code: &str,
-    info: &FileInfo,
     opts: DownloadOptions,
     output_dir: &Path,
     on_progress: ProgressFn,
 ) -> Result<PathBuf, CoreError> {
-    let mut url = client.url(&format!("/cli/shares/{}/download", code));
+    let mut url = client.url(&format!("/cli/shares/{}/download-url", code));
     let mut params = Vec::new();
     if let Some(ref pw) = opts.password { params.push(format!("password={}", pw)); }
     if let Some(ref fid) = opts.file_id { params.push(format!("file_id={}", fid)); }
     if !params.is_empty() { url = format!("{}?{}", url, params.join("&")); }
 
-    let resp = client.client.get(&url).send().await?;
+    let resp = client.client.post(&url).send().await?;
     if !resp.status().is_success() { return Err(api_error(resp).await); }
+    let issued: CliDownloadUrlResponse = resp.json().await?;
 
-    let file_name = resp
-        .headers()
-        .get("content-disposition")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| {
-            if let Some(start) = v.find("filename*=UTF-8''") {
-                let encoded = &v[start + 17..];
-                let encoded = encoded.split(';').next().unwrap_or(encoded).trim();
-                percent_decode(encoded)
-            } else if let Some(start) = v.find("filename=") {
-                let name = &v[start + 9..];
-                let name = name.split(';').next().unwrap_or(name).trim();
-                Some(name.trim_matches('"').to_string())
-            } else {
-                None
-            }
-        })
-        .unwrap_or_else(|| {
-            if !info.files.is_empty() {
-                info.files[0].file_name.clone()
-            } else {
-                format!("download_{}", code)
-            }
-        });
+    // HTTP/1.1 only so parallel `Range` requests open separate TCP connections instead of
+    // being multiplexed onto a single HTTP/2 stream. Measured equivalent to single-stream
+    // when the network is healthy and a meaningful safety net when single-TCP cwnd ramp-up
+    // is the limiter.
+    let r2_client = reqwest::Client::builder()
+        .user_agent(format!("share-cli/{}", env!("CARGO_PKG_VERSION")))
+        .http1_only()
+        .build()
+        .map_err(CoreError::from)?;
 
     let output_path = if output_dir.is_dir() {
-        output_dir.join(sanitize_file_name(&file_name, code))
+        output_dir.join(sanitize_file_name(&issued.file_name, code))
     } else {
         output_dir.to_path_buf()
     };
 
-    let mut file = tokio::fs::File::create(&output_path).await?;
+    let total_size = issued.file_size.max(0) as u64;
+    let workers = pick_workers(total_size);
+
+    if workers <= 1 || total_size == 0 {
+        download_single_stream(&r2_client, &issued.download_url, &output_path, on_progress.clone()).await?;
+    } else {
+        download_ranges_parallel(
+            &r2_client,
+            &issued.download_url,
+            &output_path,
+            total_size,
+            workers,
+            on_progress.clone(),
+        )
+        .await?;
+    }
+
+    // Best-effort: the file is already on disk, never fail the download for a bookkeeping ping.
+    let _ = client
+        .client
+        .post(client.url(&format!("/cli/shares/{}/download-complete", code)))
+        .json(&CliDownloadCompleteRequest { file_id: &issued.file_id })
+        .send()
+        .await;
+
+    Ok(output_path)
+}
+
+async fn download_single_stream(
+    r2_client: &reqwest::Client,
+    url: &str,
+    output_path: &Path,
+    on_progress: ProgressFn,
+) -> Result<(), CoreError> {
+    let resp = r2_client.get(url).send().await?;
+    if !resp.status().is_success() {
+        return Err(CoreError::Api {
+            status: resp.status().as_u16(),
+            message: format!(
+                "Storage rejected the download (HTTP {}). The presigned URL may have expired — retry the command.",
+                resp.status()
+            ),
+        });
+    }
+    let mut file = tokio::fs::File::create(output_path).await?;
     let mut stream = resp.bytes_stream();
     use tokio::io::AsyncWriteExt;
     while let Some(chunk) = stream.next().await {
@@ -69,13 +113,109 @@ pub async fn download_share(
         on_progress(chunk.len() as u64);
     }
     file.flush().await?;
-    Ok(output_path)
+    Ok(())
 }
 
-/// Strip anything that could escape `output_dir` from a server-supplied filename.
-/// The uploader controls this name, so treat it as untrusted: drop path separators,
-/// reject `..`, refuse absolute paths, and fall back to a code-derived name if the
-/// result is empty.
+/// Each worker writes into its own disjoint byte range of the same file, so concurrent
+/// writes are safe on POSIX/Windows without a shared lock.
+async fn download_ranges_parallel(
+    r2_client: &reqwest::Client,
+    url: &str,
+    output_path: &Path,
+    total_size: u64,
+    workers: u64,
+    on_progress: ProgressFn,
+) -> Result<(), CoreError> {
+    {
+        let f = tokio::fs::File::create(output_path).await?;
+        f.set_len(total_size).await?;
+    }
+
+    let chunk_size = (total_size + workers - 1) / workers;
+    let mut handles: Vec<tokio::task::JoinHandle<Result<(), CoreError>>> =
+        Vec::with_capacity(workers as usize);
+
+    for i in 0..workers {
+        let start = i * chunk_size;
+        if start >= total_size {
+            break;
+        }
+        let end = (start + chunk_size).min(total_size) - 1;
+        let url = url.to_string();
+        let path = output_path.to_path_buf();
+        let client = r2_client.clone();
+        let on_progress = on_progress.clone();
+        let handle = tokio::spawn(async move {
+            let resp = client
+                .get(&url)
+                .header(reqwest::header::RANGE, format!("bytes={}-{}", start, end))
+                .send()
+                .await?;
+            let status = resp.status();
+            if status != reqwest::StatusCode::PARTIAL_CONTENT
+                && status != reqwest::StatusCode::OK
+            {
+                return Err(CoreError::Api {
+                    status: status.as_u16(),
+                    message: format!(
+                        "Storage rejected the range request (HTTP {}). The presigned URL may have expired — retry the command.",
+                        status
+                    ),
+                });
+            }
+            let mut file = tokio::fs::OpenOptions::new()
+                .write(true)
+                .open(&path)
+                .await?;
+            use tokio::io::{AsyncSeekExt, AsyncWriteExt};
+            file.seek(std::io::SeekFrom::Start(start)).await?;
+            let mut stream = resp.bytes_stream();
+            while let Some(chunk) = stream.next().await {
+                let chunk = chunk?;
+                file.write_all(&chunk).await?;
+                on_progress(chunk.len() as u64);
+            }
+            file.flush().await?;
+            Ok(())
+        });
+        handles.push(handle);
+    }
+
+    let mut first_err: Option<CoreError> = None;
+    for h in handles {
+        let r = match h.await {
+            Ok(inner) => inner,
+            Err(e) => Err(CoreError::Other(format!("download worker panicked: {}", e))),
+        };
+        if let Err(e) = r {
+            if first_err.is_none() {
+                first_err = Some(e);
+            }
+        }
+    }
+    if let Some(e) = first_err {
+        return Err(e);
+    }
+    Ok(())
+}
+
+/// A single TCP connection often can't saturate a fat link (cwnd ramp-up, BDP limits); a
+/// small fan-out closes the gap to what the browser achieves. Small files stay single-stream
+/// because per-request overhead would dominate.
+fn pick_workers(total_size: u64) -> u64 {
+    const MEDIUM_MIN: u64 = 50 * 1024 * 1024;
+    const LARGE_MIN: u64 = 200 * 1024 * 1024;
+    if total_size < MEDIUM_MIN {
+        1
+    } else if total_size < LARGE_MIN {
+        4
+    } else {
+        8
+    }
+}
+
+/// Server-supplied filename is uploader-controlled — strip path components so a
+/// malicious "../etc/passwd" can't escape `output_dir`.
 fn sanitize_file_name(raw: &str, code: &str) -> String {
     let last = raw.rsplit(['/', '\\']).next().unwrap_or("");
     let trimmed = last.trim();
@@ -124,11 +264,6 @@ struct BulkDownloadRequest<'a> {
     password: Option<&'a str>,
 }
 
-/// Stream every file in the share into a single store-only ZIP saved next to `output_dir`.
-/// The save name is `share-{code}.zip`. Returns the saved path.
-///
-/// Uses the public `/download/bulk` endpoint (no `/cli/` prefix). That endpoint accepts an
-/// explicit `file_ids` list — we pass all of them.
 pub async fn download_bulk_zip(
     client: &ApiClient,
     code: &str,
@@ -198,23 +333,3 @@ mod sanitize_tests {
     }
 }
 
-fn percent_decode(input: &str) -> Option<String> {
-    let mut result = Vec::new();
-    let bytes = input.as_bytes();
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'%' && i + 2 < bytes.len() {
-            if let Ok(byte) = u8::from_str_radix(
-                std::str::from_utf8(&bytes[i + 1..i + 3]).unwrap_or(""),
-                16,
-            ) {
-                result.push(byte);
-                i += 3;
-                continue;
-            }
-        }
-        result.push(bytes[i]);
-        i += 1;
-    }
-    String::from_utf8(result).ok()
-}

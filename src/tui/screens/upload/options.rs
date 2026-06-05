@@ -33,6 +33,13 @@ pub(crate) enum Field {
     SubmitButton,
 }
 
+#[derive(Clone)]
+pub struct UploadRetry {
+    pub password: Option<String>,
+    pub expiration: Option<String>,
+    pub one_time: bool,
+}
+
 #[allow(clippy::large_enum_variant)]
 pub enum Phase {
     Form {
@@ -47,9 +54,10 @@ pub enum Phase {
         total: u64,
         display: String,
         started_at: std::time::Instant,
+        retry: UploadRetry,
     },
     Done { result: ShareResult, copied: bool },
-    Failed(String),
+    Failed { msg: String, retry: Option<UploadRetry> },
 }
 
 pub struct State {
@@ -246,9 +254,21 @@ pub fn update(s: &mut State, ev: &Event, ctx: &mut AppCtx) -> ScreenAction {
                 _ => ScreenAction::Stay,
             }
         }
-        Phase::Failed(_) => {
+        Phase::Failed { .. } => {
             let Event::Key(k) = ev else { return ScreenAction::Stay; };
             match k.code {
+                KeyCode::Char('r') | KeyCode::Char('R') => {
+                    // start_upload mutates s.phase, so clone retry out of Failed first.
+                    let retry = if let Phase::Failed { retry: Some(r), .. } = &s.phase {
+                        Some(r.clone())
+                    } else {
+                        None
+                    };
+                    match retry {
+                        Some(r) => start_upload(s, r.password, r.expiration, r.one_time, ctx),
+                        None => ScreenAction::Stay,
+                    }
+                }
                 KeyCode::Enter | KeyCode::Esc | KeyCode::Char('q') | KeyCode::Left | KeyCode::Char('b') => ScreenAction::Pop,
                 _ => ScreenAction::Stay,
             }
@@ -287,11 +307,13 @@ fn start_upload(
     one_time: bool,
     ctx: &mut AppCtx,
 ) -> ScreenAction {
+    let retry = UploadRetry { password: password.clone(), expiration: expiration.clone(), one_time };
     let paths = s.paths.clone();
     let entries = match crate::core::upload::read_files(&paths) {
         Ok(e) => e,
         Err(e) => {
-            s.phase = Phase::Failed(e.to_string());
+            // Local file read failure is not a transient network issue — don't offer retry.
+            s.phase = Phase::Failed { msg: e.to_string(), retry: None };
             return ScreenAction::Stay;
         }
     };
@@ -302,10 +324,19 @@ fn start_upload(
         format!("{} files", entries.len())
     };
 
-    s.phase = Phase::Running { sent: 0, total, display: display.clone(), started_at: std::time::Instant::now() };
+    s.phase = Phase::Running {
+        sent: 0,
+        total,
+        display: display.clone(),
+        started_at: std::time::Instant::now(),
+        retry: retry.clone(),
+    };
 
     let Some(tx) = ctx.tx.cloned() else {
-        s.phase = Phase::Failed("Internal error: event channel not ready.".to_string());
+        s.phase = Phase::Failed {
+            msg: "Internal error: event channel not ready.".to_string(),
+            retry: None,
+        };
         return ScreenAction::Stay;
     };
     let client = ctx.client.clone();
@@ -331,11 +362,11 @@ pub fn render(s: &State, f: &mut Frame) {
         Phase::Form { password, expires_idx, one_time, focus, authenticated } => {
             render_form(f, area, &s.paths, password, *expires_idx, *one_time, *focus, *authenticated);
         }
-        Phase::Running { sent, total, display, started_at } => {
+        Phase::Running { sent, total, display, started_at, .. } => {
             render_running(f, area, *sent, *total, display, *started_at);
         }
         Phase::Done { result, copied } => render_done(f, area, result, *copied),
-        Phase::Failed(msg) => render_failed(f, area, msg),
+        Phase::Failed { msg, retry } => render_failed(f, area, msg, retry.is_some()),
     }
 }
 
@@ -785,7 +816,7 @@ fn render_done(f: &mut Frame, area: Rect, r: &ShareResult, copied: bool) {
     hints_bar(f, chunks[6], "[c] copy code    [Enter/Esc/q] home    [b/\u{2190}] new upload");
 }
 
-fn render_failed(f: &mut Frame, area: Rect, msg: &str) {
+fn render_failed(f: &mut Frame, area: Rect, msg: &str, can_retry: bool) {
     let inner = card(f, area, "Upload failed", Color::Red);
     let chunks = Layout::vertical([
         Constraint::Length(1),
@@ -817,5 +848,10 @@ fn render_failed(f: &mut Frame, area: Rect, msg: &str) {
         chunks[2],
     );
 
-    hints_bar(f, chunks[3], "[Enter/Esc/q/b/\u{2190}] retry");
+    let hint = if can_retry {
+        "[r] retry    [Enter/Esc/q/b/\u{2190}] back"
+    } else {
+        "[Enter/Esc/q/b/\u{2190}] back"
+    };
+    hints_bar(f, chunks[3], hint);
 }

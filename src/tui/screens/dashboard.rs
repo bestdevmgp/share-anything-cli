@@ -191,6 +191,37 @@ fn execute_action(a: Action, s: &mut State, ctx: &mut AppCtx) -> ScreenAction {
 
 /// Open the bulk-delete confirmation if the user is signed in and has shares.
 /// Shared by the Actions-menu entry and the hidden `X` shortcut so they stay in lock-step.
+fn refresh_history(s: &mut State, ctx: &mut AppCtx) -> ScreenAction {
+    if !ctx.client.is_authenticated() {
+        *ctx.toast = Some(crate::tui::widgets::toast::Toast::warn(
+            "Sign in to see your history.",
+        ));
+        return ScreenAction::Stay;
+    }
+    let Some(tx) = ctx.tx.cloned() else {
+        return ScreenAction::Stay;
+    };
+    s.loading = true;
+    s.downloads_loading = true;
+    s.load_error = None;
+    s.downloads_load_error = None;
+
+    let client_u = ctx.client.clone();
+    let tx_u = tx.clone();
+    let h_u = tokio::spawn(async move {
+        let r = crate::core::shares::list_my_uploads(&client_u).await;
+        let _ = tx_u.send(Event::UploadsLoaded(r));
+    });
+    let client_d = ctx.client.clone();
+    let h_d = tokio::spawn(async move {
+        let r = crate::core::shares::list_my_downloads(&client_d).await;
+        let _ = tx.send(Event::DownloadsLoaded(r));
+    });
+    ctx.tasks.push(h_u.abort_handle());
+    ctx.tasks.push(h_d.abort_handle());
+    ScreenAction::Stay
+}
+
 fn start_delete_all(s: &State, ctx: &mut AppCtx) -> ScreenAction {
     if !ctx.client.is_authenticated() {
         *ctx.toast = Some(crate::tui::widgets::toast::Toast::warn(
@@ -399,6 +430,7 @@ pub fn update(s: &mut State, ev: &Event, ctx: &mut AppCtx) -> ScreenAction {
         KeyCode::Char('i') => execute_action(Action::Info, s, ctx),
         KeyCode::Char('x') => execute_action(Action::Delete, s, ctx),
         KeyCode::Char('X') => start_delete_all(s, ctx),
+        KeyCode::Char('r') | KeyCode::Char('R') => refresh_history(s, ctx),
         KeyCode::Char('L') => {
             if authenticated {
                 execute_action(Action::Logout, s, ctx)

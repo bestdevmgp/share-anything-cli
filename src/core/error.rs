@@ -16,3 +16,16 @@ pub enum CoreError {
     Other(String),
 }
 
+impl CoreError {
+    pub fn is_retryable(&self) -> bool {
+        match self {
+            CoreError::Api { status, .. } => !matches!(
+                *status,
+                400 | 401 | 403 | 404 | 410 | 422 | 429
+            ),
+            CoreError::Unauthenticated => false,
+            _ => true,
+        }
+    }
+}
+

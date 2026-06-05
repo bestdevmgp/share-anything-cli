@@ -34,6 +34,15 @@ pub enum ModeChoice {
     Zip,
 }
 
+#[derive(Clone)]
+pub enum DownloadRetry {
+    InfoFetch { code: String },
+    Single { info: FileInfo, password: Option<String>, output_dir: PathBuf },
+    Each { info: FileInfo, password: Option<String>, output_dir: PathBuf },
+    Zip { info: FileInfo, password: Option<String>, output_dir: PathBuf },
+    P2PReceive { info: FileInfo, password: Option<String>, output_dir: PathBuf },
+}
+
 impl ModeChoice {
     fn toggle(self) -> Self {
         match self {
@@ -66,9 +75,6 @@ pub enum Phase {
         info: FileInfo,
         password: Option<String>,
         picker: PathPicker,
-        /// Each vs Zip toggle. Meaningful only when `info.files.len() > 1` and this is
-        /// not a P2P transfer; otherwise the renderer hides the toggle and Enter just
-        /// downloads.
         mode: ModeChoice,
     },
     Running {
@@ -77,10 +83,8 @@ pub enum Phase {
         total: u64,
         target_display: String,
         started_at: std::time::Instant,
+        retry: DownloadRetry,
     },
-    /// "Save each" path: sequentially fetch every file in the share into the chosen
-    /// directory. Tracks per-file progress so the UI can render the active filename
-    /// independently of the cumulative bar.
     RunningEach {
         info: FileInfo,
         current_idx: usize,
@@ -90,21 +94,22 @@ pub enum Phase {
         total_total: u64,
         saved_files: Vec<PathBuf>,
         started_at: std::time::Instant,
+        retry: DownloadRetry,
     },
     SecureRunning {
         share_code: String,
         connected_info: Option<String>,
         file_states: Vec<SecureFileState>,
-        /// Index into `file_states` of the file currently being received.
         active_idx: Option<usize>,
         started_at: std::time::Instant,
         log: Vec<String>,
         saved_files: Vec<PathBuf>,
+        retry: DownloadRetry,
     },
     Done { saved: PathBuf },
     DoneEach { saved_files: Vec<PathBuf> },
     SecureDone { saved_files: Vec<PathBuf>, log: Vec<String> },
-    Failed(String),
+    Failed { msg: String, retry: Option<DownloadRetry> },
 }
 
 pub struct State {
@@ -198,7 +203,7 @@ pub fn update(s: &mut State, ev: &Event, ctx: &mut AppCtx) -> ScreenAction {
                         return ScreenAction::Stay;
                     }
                     let Some(tx) = ctx.tx.cloned() else {
-                        s.phase = Phase::Failed("Internal error: event channel not ready.".into());
+                        s.phase = Phase::Failed { msg: "Internal error: event channel not ready.".into(), retry: None };
                         return ScreenAction::Stay;
                     };
                     let client = ctx.client.clone();
@@ -234,11 +239,11 @@ pub fn update(s: &mut State, ev: &Event, ctx: &mut AppCtx) -> ScreenAction {
                         return ScreenAction::Stay;
                     }
                     let Some(tx) = ctx.tx.cloned() else {
-                        s.phase = Phase::Failed("Internal error: event channel not ready.".into());
+                        s.phase = Phase::Failed { msg: "Internal error: event channel not ready.".into(), retry: None };
                         return ScreenAction::Stay;
                     };
                     if let Phase::NeedsPassword { info, password: _, error: _ } =
-                        std::mem::replace(&mut s.phase, Phase::Failed("Internal state error.".into()))
+                        std::mem::replace(&mut s.phase, Phase::Failed { msg: "Internal state error.".into(), retry: None })
                     {
                         let client = ctx.client.clone();
                         let code_for_task = info.share_code.clone();
@@ -282,7 +287,6 @@ pub fn update(s: &mut State, ev: &Event, ctx: &mut AppCtx) -> ScreenAction {
         }
         Phase::ChoosePath { picker, mode, info, .. } => {
             let Event::Key(k) = ev else { return ScreenAction::Stay; };
-            // Mode toggle is only meaningful when the user has a real choice.
             let toggle_visible = info.files.len() > 1 && info.transfer_type.as_deref() != Some("p2p");
             match k.code {
                 KeyCode::Esc | KeyCode::Char('q') => ScreenAction::Pop,
@@ -371,16 +375,30 @@ pub fn update(s: &mut State, ev: &Event, ctx: &mut AppCtx) -> ScreenAction {
                 ScreenAction::Stay
             }
         }
-        Phase::Failed(_) => {
+        Phase::Failed { .. } => {
             let Event::Key(k) = ev else { return ScreenAction::Stay; };
-            if matches!(k.code, KeyCode::Enter | KeyCode::Esc | KeyCode::Char('q') | KeyCode::Left | KeyCode::Char('b')) {
-                // Reset to the code-input step so a typo can be corrected in place.
-                let mut code = TextArea::default();
-                code.set_placeholder_text("123456");
-                code.set_block(Block::default().borders(Borders::ALL).title(" Share code "));
-                s.phase = Phase::InputCode { code };
+            match k.code {
+                KeyCode::Char('r') | KeyCode::Char('R') => {
+                    let retry = if let Phase::Failed { retry: Some(r), .. } = &s.phase {
+                        Some(r.clone())
+                    } else {
+                        None
+                    };
+                    match retry {
+                        Some(r) => restart_from_retry(s, r, ctx),
+                        None => ScreenAction::Stay,
+                    }
+                }
+                KeyCode::Enter | KeyCode::Esc | KeyCode::Char('q') | KeyCode::Left | KeyCode::Char('b') => {
+                    // Reset to the code-input step so a typo can be corrected in place.
+                    let mut code = TextArea::default();
+                    code.set_placeholder_text("123456");
+                    code.set_block(Block::default().borders(Borders::ALL).title(" Share code "));
+                    s.phase = Phase::InputCode { code };
+                    ScreenAction::Stay
+                }
+                _ => ScreenAction::Stay,
             }
-            ScreenAction::Stay
         }
         Phase::SecureDone { .. } => {
             let Event::Key(k) = ev else { return ScreenAction::Stay; };
@@ -392,12 +410,40 @@ pub fn update(s: &mut State, ev: &Event, ctx: &mut AppCtx) -> ScreenAction {
     }
 }
 
-/// Called when the user presses Enter on "Save here" in `ChoosePath`. Routes directly to
-/// the right runner based on transfer type, file count, and the in-screen mode toggle.
+fn restart_from_retry(s: &mut State, retry: DownloadRetry, ctx: &mut AppCtx) -> ScreenAction {
+    match retry {
+        DownloadRetry::InfoFetch { code } => {
+            let Some(tx) = ctx.tx.cloned() else {
+                s.phase = Phase::Failed { msg: "Internal error: event channel not ready.".into(), retry: None };
+                return ScreenAction::Stay;
+            };
+            let client = ctx.client.clone();
+            let code_for_task = code.clone();
+            let handle = tokio::spawn(async move {
+                let r = crate::core::shares::get_share_info(&client, &code_for_task).await;
+                let _ = tx.send(Event::DownloadInfo(r));
+            });
+            ctx.tasks.push(handle.abort_handle());
+            s.phase = Phase::FetchingInfo { code };
+            ScreenAction::Stay
+        }
+        DownloadRetry::Single { info, password, output_dir }
+        | DownloadRetry::P2PReceive { info, password, output_dir } => {
+            start_single_or_p2p(s, info, password, output_dir, ctx)
+        }
+        DownloadRetry::Each { info, password, output_dir } => {
+            start_each(s, info, password, output_dir, ctx)
+        }
+        DownloadRetry::Zip { info, password, output_dir } => {
+            start_zip(s, info, password, output_dir, ctx)
+        }
+    }
+}
+
 fn enter_save_path(s: &mut State, output_dir: PathBuf, ctx: &mut AppCtx) -> ScreenAction {
-    let replaced = std::mem::replace(&mut s.phase, Phase::Failed("Internal state error.".into()));
+    let replaced = std::mem::replace(&mut s.phase, Phase::Failed { msg: "Internal state error.".into(), retry: None });
     let Phase::ChoosePath { info, password, picker: _, mode } = replaced else {
-        s.phase = Phase::Failed("Internal state error.".into());
+        s.phase = Phase::Failed { msg: "Internal state error.".into(), retry: None };
         return ScreenAction::Stay;
     };
 
@@ -413,8 +459,6 @@ fn enter_save_path(s: &mut State, output_dir: PathBuf, ctx: &mut AppCtx) -> Scre
     start_single_or_p2p(s, info, password, output_dir, ctx)
 }
 
-/// Single-stream path: either P2P secure transfer or a single-file server download. The
-/// existing `Running` phase handles both progress shapes.
 fn start_single_or_p2p(
     s: &mut State,
     info: FileInfo,
@@ -427,8 +471,13 @@ fn start_single_or_p2p(
         let total: u64 = info.files.iter().map(|f| f.file_size.max(0) as u64).sum();
 
         let Some(tx) = ctx.tx.cloned() else {
-            s.phase = Phase::Failed("Internal error: event channel not ready.".into());
+            s.phase = Phase::Failed { msg: "Internal error: event channel not ready.".into(), retry: None };
             return ScreenAction::Stay;
+        };
+        let retry = DownloadRetry::P2PReceive {
+            info: info.clone(),
+            password: password.clone(),
+            output_dir: output_dir.clone(),
         };
         let client = ctx.client.clone();
         let tx_events = tx.clone();
@@ -462,6 +511,7 @@ fn start_single_or_p2p(
             started_at: std::time::Instant::now(),
             log: vec!["Connecting to sender\u{2026}".into()],
             saved_files: vec![],
+            retry,
         };
         let handle = tokio::spawn(async move {
             let r = crate::core::p2p::receiver::run(&client, receiver_opts, on_event).await;
@@ -475,6 +525,11 @@ fn start_single_or_p2p(
         return ScreenAction::Stay;
     }
 
+    let retry = DownloadRetry::Single {
+        info: info.clone(),
+        password: password.clone(),
+        output_dir: output_dir.clone(),
+    };
     let code = info.share_code.clone();
     let target_total = if !info.files.is_empty() {
         info.files[0].file_size.max(0) as u64
@@ -488,12 +543,11 @@ fn start_single_or_p2p(
     };
 
     let Some(tx) = ctx.tx.cloned() else {
-        s.phase = Phase::Failed("Internal error: event channel not ready.".into());
+        s.phase = Phase::Failed { msg: "Internal error: event channel not ready.".into(), retry: None };
         return ScreenAction::Stay;
     };
 
     let client = ctx.client.clone();
-    let info_for_task = info.clone();
     let opts = crate::core::download::DownloadOptions { password, file_id: None };
     let tx_for_progress = tx.clone();
     let on_progress: crate::core::ProgressFn = std::sync::Arc::new(move |n: u64| {
@@ -504,7 +558,6 @@ fn start_single_or_p2p(
         let r = crate::core::download::download_share(
             &client,
             &code,
-            &info_for_task,
             opts,
             &output_dir,
             on_progress,
@@ -520,14 +573,11 @@ fn start_single_or_p2p(
         total: target_total,
         target_display,
         started_at: std::time::Instant::now(),
+        retry,
     };
     ScreenAction::Stay
 }
 
-/// Save-each path: spawn one task that loops through `info.files` calling
-/// `download_share` per file. Emits `DownloadProgress` for byte counts and
-/// `DownloadEachAdvance` after each file completes; the final result lands as
-/// `DownloadEachFinished` for the success/failure transition.
 fn start_each(
     s: &mut State,
     info: FileInfo,
@@ -536,10 +586,15 @@ fn start_each(
     ctx: &mut AppCtx,
 ) -> ScreenAction {
     let Some(tx) = ctx.tx.cloned() else {
-        s.phase = Phase::Failed("Internal error: event channel not ready.".into());
+        s.phase = Phase::Failed { msg: "Internal error: event channel not ready.".into(), retry: None };
         return ScreenAction::Stay;
     };
 
+    let retry = DownloadRetry::Each {
+        info: info.clone(),
+        password: password.clone(),
+        output_dir: output_dir.clone(),
+    };
     let code = info.share_code.clone();
     let total_total: u64 = info.files.iter().map(|f| f.file_size.max(0) as u64).sum();
     let file_total = info.files[0].file_size.max(0) as u64;
@@ -561,7 +616,6 @@ fn start_each(
             let r = crate::core::download::download_share(
                 &client,
                 &code,
-                &info_for_task,
                 opts,
                 &output_dir,
                 on_progress.clone(),
@@ -570,8 +624,8 @@ fn start_each(
             match r {
                 Ok(path) => {
                     saved.push(path.clone());
-                    // Only emit advance between files — the final completion goes through
-                    // DownloadEachFinished so the Done transition is unambiguous.
+                    // The final completion goes through DownloadEachFinished — only emit
+                    // advance for the in-between files.
                     if idx + 1 < info_for_task.files.len() {
                         let _ = tx.send(Event::DownloadEachAdvance { idx, saved: path });
                     }
@@ -595,11 +649,11 @@ fn start_each(
         total_total,
         saved_files: vec![],
         started_at: std::time::Instant::now(),
+        retry,
     };
     ScreenAction::Stay
 }
 
-/// ZIP path: single POST to /download/bulk, save the streamed archive as `{code}.zip`.
 fn start_zip(
     s: &mut State,
     info: FileInfo,
@@ -608,13 +662,17 @@ fn start_zip(
     ctx: &mut AppCtx,
 ) -> ScreenAction {
     let Some(tx) = ctx.tx.cloned() else {
-        s.phase = Phase::Failed("Internal error: event channel not ready.".into());
+        s.phase = Phase::Failed { msg: "Internal error: event channel not ready.".into(), retry: None };
         return ScreenAction::Stay;
     };
 
+    let retry = DownloadRetry::Zip {
+        info: info.clone(),
+        password: password.clone(),
+        output_dir: output_dir.clone(),
+    };
     let code = info.share_code.clone();
-    // ZIP content-length is unknown ahead of time — use sum of file sizes as a rough cap so
-    // the gauge has a sensible denominator. (Real ZIP slightly differs by header overhead.)
+    // ZIP content-length is unknown ahead of time — sum of file sizes is a rough denominator.
     let target_total: u64 = info.files.iter().map(|f| f.file_size.max(0) as u64).sum();
     let target_display = format!("share-{}.zip", code);
     let file_ids: Vec<String> = info.files.iter().map(|f| f.id.clone()).collect();
@@ -645,6 +703,7 @@ fn start_zip(
         total: target_total,
         target_display,
         started_at: std::time::Instant::now(),
+        retry,
     };
     ScreenAction::Stay
 }
@@ -662,7 +721,7 @@ pub fn render(s: &State, f: &mut Frame) {
         Phase::ChoosePath { info, picker, mode, .. } => {
             render_choose_path(f, area, info, picker, *mode)
         }
-        Phase::Running { info, received, total, target_display, started_at } => {
+        Phase::Running { info, received, total, target_display, started_at, .. } => {
             render_running(f, area, info, *received, *total, target_display, *started_at)
         }
         Phase::RunningEach { info, current_idx, file_received, file_total, total_received, total_total, started_at, .. } => {
@@ -677,7 +736,7 @@ pub fn render(s: &State, f: &mut Frame) {
         Phase::Done { saved } => render_done(f, area, saved),
         Phase::DoneEach { saved_files } => render_done_each(f, area, saved_files),
         Phase::SecureDone { saved_files, log } => render_secure_done_dl(f, area, saved_files, log),
-        Phase::Failed(msg) => render_failed(f, area, msg),
+        Phase::Failed { msg, retry } => render_failed(f, area, msg, retry.is_some()),
     }
 }
 
@@ -746,9 +805,6 @@ fn section_header(text: impl Into<String>) -> Line<'static> {
     ))
 }
 
-/// Truncates the visible file list to `area.height` and surfaces the dropped count with a
-/// "+N more" line. Used by the download `ChoosePath` screen so a share with many files
-/// can't squeeze the path picker out of view.
 fn render_files_section_capped(f: &mut Frame, area: Rect, info: &FileInfo) {
     let cap = area.height as usize;
     if cap == 0 { return; }
@@ -954,19 +1010,12 @@ fn render_choose_path(
 
     let toggle_visible = info.files.len() > 1 && info.transfer_type.as_deref() != Some("p2p");
     let mode_h: u16 = if toggle_visible { 1 } else { 0 };
-    // Extra breathing room between the mode toggle and the Save path block — only when the
-    // toggle is actually rendered, otherwise we'd leave a dead gap above Save path.
     let gap_h: u16 = if toggle_visible { 1 } else { 0 };
-    // Reserve at least 8 rows for the path picker so navigation stays usable even when the
-    // share has many files. The file list shrinks first; render_files_section then shows a
-    // "+N more" line if it had to drop entries.
+    // Picker needs room to navigate even with many files — file list shrinks first, then
+    // shows "+N more"; FILES_SOFT_CAP also stops the list dominating tall terminals.
     const PICKER_MIN: u16 = 8;
-    // Soft cap on the file list. Even when the terminal is tall we don't want a long share
-    // to dominate the screen — `render_files_section_capped` will show "+N more" past this
-    // many rows (header + N-1 files). Chosen to leave headroom for the path picker on a
-    // standard 24-row terminal once `Download as` and its gap are accounted for.
     const FILES_SOFT_CAP: u16 = 12;
-    let fixed_h: u16 = 1 + 1 + 1 + 1 + mode_h + gap_h + 1 + 1; // chunks 0,1,2,4,5,6,7,9
+    let fixed_h: u16 = 1 + 1 + 1 + 1 + mode_h + gap_h + 1 + 1;
     let want_files_h = info.files.len() as u16 + 1;
     let max_files_h = inner.height.saturating_sub(fixed_h + PICKER_MIN);
     let files_h = want_files_h
@@ -975,16 +1024,16 @@ fn render_choose_path(
         .max(2);
 
     let chunks = Layout::vertical([
-        Constraint::Length(1),       // 0 spacer
-        Constraint::Length(1),       // 1 info bar
-        Constraint::Length(1),       // 2 spacer
-        Constraint::Length(files_h), // 3 file list
-        Constraint::Length(1),       // 4 spacer between file list and next section
-        Constraint::Length(mode_h),  // 5 mode toggle (0 if single-file)
-        Constraint::Length(gap_h),   // 6 gap between mode toggle and Save path
-        Constraint::Length(1),       // 7 "Save path" header
-        Constraint::Min(PICKER_MIN), // 8 picker
-        Constraint::Length(1),       // 9 hints
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(files_h),
+        Constraint::Length(1),
+        Constraint::Length(mode_h),
+        Constraint::Length(gap_h),
+        Constraint::Length(1),
+        Constraint::Min(PICKER_MIN),
+        Constraint::Length(1),
     ])
     .split(inner);
 
@@ -1005,9 +1054,6 @@ fn render_choose_path(
     hints(f, chunks[9], hint_text);
 }
 
-/// One-line toggle showing both options and highlighting the selected one. Sits between
-/// the file list and the path picker so the user sees the mode they're committing to
-/// when they hit Enter on "Save here".
 fn render_mode_toggle(f: &mut Frame, area: Rect, mode: ModeChoice) {
     let selected_style = Style::default()
         .fg(Color::Black)
@@ -1424,7 +1470,6 @@ fn render_secure_done_dl(f: &mut Frame, area: Rect, saved_files: &[PathBuf], log
     hints(f, chunks[3], " [Enter/Esc/q/b/\u{2190}] home ");
 }
 
-/// Per-file gauge + cumulative summary for the "save each" multi-file download path.
 #[allow(clippy::too_many_arguments)]
 fn render_running_each(
     f: &mut Frame,
@@ -1531,7 +1576,6 @@ fn render_done_each(f: &mut Frame, area: Rect, saved_files: &[PathBuf]) {
         chunks[1],
     );
 
-    // Cap the visible list to whatever fits in chunks[2] and surface dropped count.
     let body_area = chunks[2];
     let cap = body_area.height as usize;
     let mut lines: Vec<Line> = Vec::with_capacity(cap.max(1));
@@ -1604,7 +1648,7 @@ fn render_done(f: &mut Frame, area: Rect, saved: &Path) {
     hints(f, chunks[4], "[Enter/Esc/q/b/\u{2190}] home");
 }
 
-fn render_failed(f: &mut Frame, area: Rect, msg: &str) {
+fn render_failed(f: &mut Frame, area: Rect, msg: &str, can_retry: bool) {
     let inner = card(f, area, "Download failed", Color::Red);
     let chunks = Layout::vertical([
         Constraint::Length(1),
@@ -1636,5 +1680,10 @@ fn render_failed(f: &mut Frame, area: Rect, msg: &str) {
         chunks[2],
     );
 
-    hints(f, chunks[3], "[Enter/Esc/q/b/\u{2190}] try another code");
+    let hint = if can_retry {
+        "[r] retry    [Enter/Esc/q/b/\u{2190}] try another code"
+    } else {
+        "[Enter/Esc/q/b/\u{2190}] try another code"
+    };
+    hints(f, chunks[3], hint);
 }

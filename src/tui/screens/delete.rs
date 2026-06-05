@@ -134,8 +134,8 @@ pub fn render(s: &State, f: &mut Frame) {
     }
 }
 
-/// Bordered status box without yes/no buttons. Used for transient (Deleting) and terminal
-/// (Failed) states where the confirm widget's button row would be misleading.
+/// Like `confirm::render` but without the yes/no buttons — for status displays where
+/// a choice would be misleading.
 fn render_status_box(
     f: &mut Frame,
     area: ratatui::layout::Rect,

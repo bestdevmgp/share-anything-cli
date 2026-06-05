@@ -29,7 +29,6 @@ pub async fn run(
 
     let output_dir = output.unwrap_or_else(|| PathBuf::from("."));
 
-    // Branch: single file (or explicit --file-id) → single download; multi-file → loop or ZIP.
     let multi = info.files.len() > 1 && file_id.is_none();
 
     if multi && zip {
@@ -63,7 +62,7 @@ pub async fn run(
                 file_id: Some(f.id.clone()),
             };
             let saved =
-                download_share(client, &code, &info, opts, &output_dir, on_progress).await?;
+                download_share(client, &code, opts, &output_dir, on_progress).await?;
             pb.finish_and_clear();
             saved_paths.push(saved);
         }
@@ -79,7 +78,6 @@ pub async fn run(
         return Ok(());
     }
 
-    // Single-file path (or explicit --file-id pinpointing one file of a multi-file share).
     let target_total = info.files.first().map(|f| f.file_size as u64).unwrap_or(0);
     let target_name = info
         .files
@@ -92,7 +90,6 @@ pub async fn run(
     let saved = download_share(
         client,
         &code,
-        &info,
         DownloadOptions { password, file_id },
         &output_dir,
         on_progress,

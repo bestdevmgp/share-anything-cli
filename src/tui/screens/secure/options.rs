@@ -35,6 +35,11 @@ pub enum FileStatus {
     Done,
 }
 
+#[derive(Clone)]
+pub struct SecureRetry {
+    pub password: Option<String>,
+}
+
 #[allow(clippy::large_enum_variant)]
 pub enum Phase {
     Form {
@@ -57,13 +62,14 @@ pub enum Phase {
         /// Flipped to `true` after the user presses [c] so the inline "Press [c] to copy"
         /// hint can morph into a green confirmation in place.
         copied: bool,
+        retry: SecureRetry,
     },
     Done {
         share_code: String,
         log: Vec<String>,
         copied: bool,
     },
-    Failed(String),
+    Failed { msg: String, retry: Option<SecureRetry> },
 }
 
 pub struct State {
@@ -183,25 +189,33 @@ pub fn update(s: &mut State, ev: &Event, ctx: &mut AppCtx) -> ScreenAction {
                 _ => ScreenAction::Stay,
             }
         }
-        Phase::Failed(_) => {
+        Phase::Failed { .. } => {
             let Event::Key(k) = ev else { return ScreenAction::Stay; };
-            if matches!(
-                k.code,
+            match k.code {
+                KeyCode::Char('r') | KeyCode::Char('R') => {
+                    let retry = if let Phase::Failed { retry: Some(r), .. } = &s.phase {
+                        Some(r.clone())
+                    } else {
+                        None
+                    };
+                    match retry {
+                        Some(r) => start_send(s, r.password, ctx),
+                        None => ScreenAction::Stay,
+                    }
+                }
                 KeyCode::Enter
-                    | KeyCode::Esc
-                    | KeyCode::Char('q')
-                    | KeyCode::Left
-                    | KeyCode::Char('b')
-            ) {
-                ScreenAction::Pop
-            } else {
-                ScreenAction::Stay
+                | KeyCode::Esc
+                | KeyCode::Char('q')
+                | KeyCode::Left
+                | KeyCode::Char('b') => ScreenAction::Pop,
+                _ => ScreenAction::Stay,
             }
         }
     }
 }
 
 fn start_send(s: &mut State, password: Option<String>, ctx: &mut AppCtx) -> ScreenAction {
+    let retry = SecureRetry { password: password.clone() };
     let opts = crate::core::p2p::sender::SenderOptions {
         files: s.paths.clone(),
         stdin_data: None,
@@ -219,9 +233,13 @@ fn start_send(s: &mut State, password: Option<String>, ctx: &mut AppCtx) -> Scre
         log: vec!["Connecting to signaling server\u{2026}".into()],
         relay_in_use: false,
         copied: false,
+        retry: retry.clone(),
     };
     let Some(tx) = ctx.tx.cloned() else {
-        s.phase = Phase::Failed("Internal error: event channel not ready.".into());
+        s.phase = Phase::Failed {
+            msg: "Internal error: event channel not ready.".into(),
+            retry: None,
+        };
         return ScreenAction::Stay;
     };
     let client = ctx.client.clone();
@@ -279,7 +297,7 @@ pub fn render(s: &State, f: &mut Frame) {
             );
         }
         Phase::Done { share_code, log, copied } => render_done(f, area, share_code, log, *copied),
-        Phase::Failed(msg) => render_failed(f, area, msg),
+        Phase::Failed { msg, retry } => render_failed(f, area, msg, retry.is_some()),
     }
 }
 
@@ -908,7 +926,7 @@ fn render_done(f: &mut Frame, area: Rect, share_code: &str, log: &[String], copi
     );
 }
 
-fn render_failed(f: &mut Frame, area: Rect, msg: &str) {
+fn render_failed(f: &mut Frame, area: Rect, msg: &str, can_retry: bool) {
     let chunks = Layout::vertical([
         Constraint::Length(2),
         Constraint::Length(5),
@@ -927,9 +945,13 @@ fn render_failed(f: &mut Frame, area: Rect, msg: &str) {
         Paragraph::new(format!(" {}", msg)).style(Style::default().fg(Color::Red)),
         chunks[1],
     );
+    let hint = if can_retry {
+        " [r] retry    [Enter/Esc/q/b/\u{2190}] back "
+    } else {
+        " [Enter/Esc/q/b/\u{2190}] back "
+    };
     f.render_widget(
-        Paragraph::new(" [Enter/Esc/q/b/\u{2190}] retry ")
-            .style(Style::default().fg(Color::DarkGray)),
+        Paragraph::new(hint).style(Style::default().fg(Color::DarkGray)),
         chunks[3],
     );
 }

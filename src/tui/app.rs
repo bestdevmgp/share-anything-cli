@@ -195,7 +195,18 @@ impl App {
                 if let Some(Screen::Upload(crate::tui::screens::upload::Screen::Options(s))) = self.stack.last_mut() {
                     s.phase = match result {
                         Ok(r) => crate::tui::screens::upload::options::Phase::Done { result: r, copied: false },
-                        Err(e) => crate::tui::screens::upload::options::Phase::Failed(e.to_string()),
+                        Err(e) => {
+                            let retry = if e.is_retryable() {
+                                if let crate::tui::screens::upload::options::Phase::Running { retry, .. } = &s.phase {
+                                    Some(retry.clone())
+                                } else {
+                                    None
+                                }
+                            } else {
+                                None
+                            };
+                            crate::tui::screens::upload::options::Phase::Failed { msg: e.to_string(), retry }
+                        }
                     };
                 }
             }
@@ -219,7 +230,21 @@ impl App {
                             }
                         }
                         Err(e) => {
-                            s.phase = crate::tui::screens::download::Phase::Failed(e.to_string());
+                            let retry = if e.is_retryable() {
+                                if let crate::tui::screens::download::Phase::FetchingInfo { code } = &s.phase {
+                                    Some(crate::tui::screens::download::DownloadRetry::InfoFetch {
+                                        code: code.clone(),
+                                    })
+                                } else {
+                                    None
+                                }
+                            } else {
+                                None
+                            };
+                            s.phase = crate::tui::screens::download::Phase::Failed {
+                                msg: e.to_string(),
+                                retry,
+                            };
                         }
                     }
                 }
@@ -228,9 +253,10 @@ impl App {
                 if let Some(Screen::Download(s)) = self.stack.last_mut() {
                     let replaced = std::mem::replace(
                         &mut s.phase,
-                        crate::tui::screens::download::Phase::Failed(
-                            "Internal state error.".into(),
-                        ),
+                        crate::tui::screens::download::Phase::Failed {
+                            msg: "Internal state error.".into(),
+                            retry: None,
+                        },
                     );
                     if let crate::tui::screens::download::Phase::VerifyingPassword {
                         info,
@@ -277,9 +303,10 @@ impl App {
                 if let Some(Screen::Download(s)) = self.stack.last_mut() {
                     let replaced = std::mem::replace(
                         &mut s.phase,
-                        crate::tui::screens::download::Phase::Failed(
-                            "Internal state error.".into(),
-                        ),
+                        crate::tui::screens::download::Phase::Failed {
+                            msg: "Internal state error.".into(),
+                            retry: None,
+                        },
                     );
                     if let crate::tui::screens::download::Phase::PasswordVerified {
                         info,
@@ -323,7 +350,18 @@ impl App {
                 if let Some(Screen::Download(s)) = self.stack.last_mut() {
                     s.phase = match result {
                         Ok(saved) => crate::tui::screens::download::Phase::Done { saved },
-                        Err(e) => crate::tui::screens::download::Phase::Failed(e.to_string()),
+                        Err(e) => {
+                            let retry = if e.is_retryable() {
+                                if let crate::tui::screens::download::Phase::Running { retry, .. } = &s.phase {
+                                    Some(retry.clone())
+                                } else {
+                                    None
+                                }
+                            } else {
+                                None
+                            };
+                            crate::tui::screens::download::Phase::Failed { msg: e.to_string(), retry }
+                        }
                     };
                 }
             }
@@ -338,8 +376,8 @@ impl App {
                         ..
                     } = &mut s.phase
                     {
-                        // Snap per-file gauge to 100% so the user sees the file finish cleanly,
-                        // then advance to the next file's metadata.
+                        // Snap per-file gauge to 100% before advancing so the file visibly
+                        // completes before we swap in the next file's metadata.
                         *file_received = *file_total;
                         saved_files.push(saved);
                         let next = idx + 1;
@@ -357,7 +395,18 @@ impl App {
                 if let Some(Screen::Download(s)) = self.stack.last_mut() {
                     s.phase = match result {
                         Ok(saved_files) => crate::tui::screens::download::Phase::DoneEach { saved_files },
-                        Err(e) => crate::tui::screens::download::Phase::Failed(e.to_string()),
+                        Err(e) => {
+                            let retry = if e.is_retryable() {
+                                if let crate::tui::screens::download::Phase::RunningEach { retry, .. } = &s.phase {
+                                    Some(retry.clone())
+                                } else {
+                                    None
+                                }
+                            } else {
+                                None
+                            };
+                            crate::tui::screens::download::Phase::Failed { msg: e.to_string(), retry }
+                        }
                     };
                 }
             }
@@ -603,7 +652,12 @@ impl App {
                                 log.push("TURN relay in use".into());
                             }
                             E::Failed(msg) => {
-                                s.phase = crate::tui::screens::secure::options::Phase::Failed(msg);
+                                let retry = if let crate::tui::screens::secure::options::Phase::Running { retry, .. } = &s.phase {
+                                    Some(retry.clone())
+                                } else {
+                                    None
+                                };
+                                s.phase = crate::tui::screens::secure::options::Phase::Failed { msg, retry };
                             }
                         }
                     }
@@ -672,10 +726,20 @@ impl App {
                                 };
                             }
                             E::SenderGone(msg) => {
-                                s.phase = crate::tui::screens::download::Phase::Failed(msg);
+                                let retry = if let crate::tui::screens::download::Phase::SecureRunning { retry, .. } = &s.phase {
+                                    Some(retry.clone())
+                                } else {
+                                    None
+                                };
+                                s.phase = crate::tui::screens::download::Phase::Failed { msg, retry };
                             }
                             E::Failed(msg) => {
-                                s.phase = crate::tui::screens::download::Phase::Failed(msg);
+                                let retry = if let crate::tui::screens::download::Phase::SecureRunning { retry, .. } = &s.phase {
+                                    Some(retry.clone())
+                                } else {
+                                    None
+                                };
+                                s.phase = crate::tui::screens::download::Phase::Failed { msg, retry };
                             }
                         }
                     }

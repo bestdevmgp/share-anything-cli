@@ -20,9 +20,6 @@ pub struct DownloadItem {
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct FileDetail {
-    /// ULID for this file row in the share. Empty when the server is older than the
-    /// multi-file download patch — callers must fall back to single-file behaviour
-    /// (server picks `files[0]` when `file_id` is omitted) if any id is empty.
     #[serde(default)]
     pub id: String,
     pub file_name: String,

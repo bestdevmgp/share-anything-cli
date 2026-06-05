@@ -31,9 +31,6 @@ pub enum Event {
     DownloadPasswordAutoTransition,
     DownloadProgress { delta: u64 },
     DownloadFinished(Result<PathBuf, CoreError>),
-    /// One file in a multi-file "save each" download just finished. Carries the index
-    /// of the file that completed and where it was saved. The downloader task emits one
-    /// of these per file, then `DownloadEachFinished` at the end.
     DownloadEachAdvance { idx: usize, saved: PathBuf },
     DownloadEachFinished(Result<Vec<PathBuf>, CoreError>),
 
