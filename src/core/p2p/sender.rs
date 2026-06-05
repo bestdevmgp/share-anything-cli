@@ -39,8 +39,6 @@ pub enum SenderEvent {
     TransferComplete,
     /// Receiver disconnected mid-flight.
     ReceiverDisconnected,
-    /// Connection lost / failure (non-fatal informational).
-    Warning(String),
     /// ICE selected a TURN relay candidate — bytes are going through a relay, expect slower
     /// throughput.
     RelayDetected,

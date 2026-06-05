@@ -598,9 +598,6 @@ impl App {
                                     copied: false,
                                 };
                             }
-                            E::Warning(msg) => {
-                                log.push(format!("\u{26a0} {}", msg));
-                            }
                             E::RelayDetected => {
                                 *relay_in_use = true;
                                 log.push("TURN relay in use".into());

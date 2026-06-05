@@ -97,9 +97,6 @@ pub async fn run(
                 let mut slot = sslot.lock().unwrap();
                 *slot = Some(create_spinner("Waiting for receiver to connect..."));
             }
-            SenderEvent::Warning(msg) => {
-                println!("\x1b[33m⚠ {}\x1b[0m", msg);
-            }
             SenderEvent::RelayDetected => {
                 println!("\x1b[33mℹ TURN server relay in use\x1b[0m");
             }

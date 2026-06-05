@@ -104,12 +104,6 @@ impl SignalingClient {
         self.receiver.recv().await
     }
 
-    /// Non-blocking receive. Returns None if no message is currently queued. Used to drain
-    /// stale messages between multi-file P2P sessions without blocking on `recv()`.
-    pub fn try_recv(&mut self) -> Option<SignalingMessage> {
-        self.receiver.try_recv().ok()
-    }
-
     pub fn shutdown(self) {
         self.read_handle.abort();
         self.write_handle.abort();
