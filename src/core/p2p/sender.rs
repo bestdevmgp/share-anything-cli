@@ -169,185 +169,252 @@ pub async fn run(
     })
     .map_err(|e| CoreError::P2P(e.to_string()))?;
 
-    // Multi-file shares use one RTCPeerConnection per file (web client does the same):
-    // build a fresh pc/dc on each PeerMatched, send the one requested file, close, repeat.
-    // The session only ends when the receiver clicks Done (server sends TransferComplete).
-    loop {
-        let (matched_file_name, matched_device_info) = loop {
-            match sig.recv().await {
-                Some(SignalingMessage::DownloaderArrived { device_info, .. }) => {
-                    on_event(SenderEvent::ReceiverArrived { device_info });
-                }
-                Some(SignalingMessage::PeerMatched { file_name, device_info, .. }) => {
-                    break (file_name, device_info);
-                }
-                Some(SignalingMessage::TransferComplete { .. }) => {
-                    on_event(SenderEvent::TransferComplete);
-                    sig.shutdown();
-                    return Ok(());
-                }
-                Some(SignalingMessage::Error { message }) => {
-                    return Err(CoreError::P2P(message));
-                }
-                None => {
-                    return Err(CoreError::P2P("Signaling connection closed".into()));
-                }
-                _ => {}
+    // Single PC + DC + WS for the entire session. After the first PeerMatched the
+    // receiver requests every subsequent file via `SignalingMessage::FileRequest`
+    // on the same WS; the uploader streams each file on the same DC. This drops
+    // per-file dead time from "full ICE handshake" (5–15s on a TURN relay) to
+    // "one signaling RTT".
+    let (first_file_name, first_device_info) = loop {
+        match sig.recv().await {
+            Some(SignalingMessage::DownloaderArrived { device_info, .. }) => {
+                on_event(SenderEvent::ReceiverArrived { device_info });
             }
-        };
+            Some(SignalingMessage::PeerMatched { file_name, device_info, .. }) => {
+                break (file_name, device_info);
+            }
+            Some(SignalingMessage::TransferComplete { .. }) => {
+                on_event(SenderEvent::TransferComplete);
+                sig.shutdown();
+                return Ok(());
+            }
+            Some(SignalingMessage::Error { message }) => {
+                return Err(CoreError::P2P(message));
+            }
+            None => {
+                return Err(CoreError::P2P("Signaling connection closed".into()));
+            }
+            _ => {}
+        }
+    };
 
-        on_event(SenderEvent::PeerMatched { device_info: matched_device_info });
+    on_event(SenderEvent::PeerMatched { device_info: first_device_info });
 
-        // The outer wait loop consumes one signaling message at a time until PeerMatched,
-        // but any messages that arrived AFTER PeerMatched (e.g. late ICE candidates from
-        // the previous file's receiver pc) are still queued and would otherwise be added
-        // to the fresh pc's ICE table by the 'negotiation loop — at best wasted checks,
-        // at worst the new pc's ICE locks onto a stale endpoint. Drain anything that
-        // piled up before we send the new file's Offer; nothing for this file can be in
-        // the queue yet since the Offer hasn't gone out.
-        while sig.try_recv().is_some() {}
-
-        // file_name may be None for single-file shares; fall back to the first file.
-        let file_to_send: &PreparedFile = match &matched_file_name {
-            Some(name) => prepared
-                .iter()
-                .find(|f| &f.name == name)
-                .unwrap_or(&prepared[0]),
-            None => &prepared[0],
-        };
-
-        let pc = rtc::create_peer_connection(ice_servers.clone())
-            .await
-            .map_err(|e| CoreError::P2P(e.to_string()))?;
-        let dc = rtc::create_data_channel(&pc)
-            .await
-            .map_err(|e| CoreError::P2P(e.to_string()))?;
-
-        let (ice_tx, mut ice_rx) = mpsc::unbounded_channel::<RTCIceCandidateInit>();
-        let (state_tx, mut state_rx) = mpsc::unbounded_channel::<RTCIceConnectionState>();
-        rtc::setup_ice_candidate_handler(&pc, ice_tx);
-        rtc::setup_connection_state_handler(&pc, state_tx);
-
-        let offer = rtc::create_offer(&pc)
-            .await
-            .map_err(|e| CoreError::P2P(e.to_string()))?;
-        sig.send(SignalingMessage::Offer {
-            share_code: share_code.clone(),
-            sdp: offer.sdp,
-            peer_id: peer_id.clone(),
-        })
+    let pc = rtc::create_peer_connection(ice_servers.clone())
+        .await
+        .map_err(|e| CoreError::P2P(e.to_string()))?;
+    let dc = rtc::create_data_channel(&pc)
+        .await
         .map_err(|e| CoreError::P2P(e.to_string()))?;
 
-        // `transfer_succeeded` tells the Disconnected branch apart from an
-        // expected post-transfer disconnect vs a mid-flight drop.
-        //
-        // Negotiation stall guard: ICE typically completes within seconds (≤15s even on
-        // a TURN-only relay). Reset on every signaling message, ICE candidate, or state
-        // change. If everything goes silent for `NEGOTIATION_STALL_TIMEOUT` we abort
-        // rather than wedge — e.g. when a stale signaling registration leaves the
-        // backend with no downloader to relay the Answer to.
-        const NEGOTIATION_STALL_TIMEOUT: std::time::Duration =
-            std::time::Duration::from_secs(60);
-        let mut deadline = tokio::time::Instant::now() + NEGOTIATION_STALL_TIMEOUT;
-        let transfer_succeeded = 'negotiation: loop {
-            tokio::select! {
-                Some(msg) = sig.recv() => {
-                    deadline = tokio::time::Instant::now() + NEGOTIATION_STALL_TIMEOUT;
-                    match msg {
-                        SignalingMessage::Answer { sdp, .. } => {
-                            let answer = RTCSessionDescription::answer(sdp)
-                                .map_err(|e| CoreError::P2P(e.to_string()))?;
-                            rtc::set_remote_description(&pc, answer)
-                                .await
-                                .map_err(|e| CoreError::P2P(e.to_string()))?;
-                        }
-                        SignalingMessage::IceCandidate { candidate, .. } => {
-                            if let Some((cand, mid, idx)) = decode_ice_candidate(&candidate) {
-                                let init = RTCIceCandidateInit {
-                                    candidate: cand,
-                                    sdp_mid: mid,
-                                    sdp_mline_index: idx,
-                                    ..Default::default()
-                                };
-                                let _ = rtc::add_ice_candidate(&pc, init).await;
-                            }
-                        }
-                        SignalingMessage::DownloaderArrived { device_info, .. } => {
-                            on_event(SenderEvent::ReceiverArrived { device_info });
-                        }
-                        SignalingMessage::DownloaderOffline { .. } => {
-                            // Stale: the previous WebSocket (file N-1) closes shortly after
-                            // PeerMatched for file N is received. Ignore; ICE will still
-                            // surface a real drop via Disconnected/Failed.
-                        }
-                        SignalingMessage::TransferComplete { .. } => {
-                            on_event(SenderEvent::TransferComplete);
-                            let _ = pc.close().await;
-                            sig.shutdown();
-                            return Ok(());
-                        }
-                        SignalingMessage::Error { message } => {
-                            return Err(CoreError::P2P(message));
-                        }
-                        _ => {}
+    let (ice_tx, mut ice_rx) = mpsc::unbounded_channel::<RTCIceCandidateInit>();
+    let (state_tx, mut state_rx) = mpsc::unbounded_channel::<RTCIceConnectionState>();
+    rtc::setup_ice_candidate_handler(&pc, ice_tx);
+    rtc::setup_connection_state_handler(&pc, state_tx);
+
+    let offer = rtc::create_offer(&pc)
+        .await
+        .map_err(|e| CoreError::P2P(e.to_string()))?;
+    sig.send(SignalingMessage::Offer {
+        share_code: share_code.clone(),
+        sdp: offer.sdp,
+        peer_id: peer_id.clone(),
+    })
+    .map_err(|e| CoreError::P2P(e.to_string()))?;
+
+    // Negotiation stall guard: ICE typically completes within seconds (≤15s even
+    // on a TURN-only relay). Anything (msg, ICE, state) resets the deadline.
+    const NEGOTIATION_STALL_TIMEOUT: std::time::Duration =
+        std::time::Duration::from_secs(60);
+    let mut deadline = tokio::time::Instant::now() + NEGOTIATION_STALL_TIMEOUT;
+
+    // First-file ICE handshake + first-file send happens here.
+    'negotiation: loop {
+        tokio::select! {
+            Some(msg) = sig.recv() => {
+                deadline = tokio::time::Instant::now() + NEGOTIATION_STALL_TIMEOUT;
+                match msg {
+                    SignalingMessage::Answer { sdp, .. } => {
+                        let answer = RTCSessionDescription::answer(sdp)
+                            .map_err(|e| CoreError::P2P(e.to_string()))?;
+                        rtc::set_remote_description(&pc, answer)
+                            .await
+                            .map_err(|e| CoreError::P2P(e.to_string()))?;
                     }
-                }
-                Some(candidate) = ice_rx.recv() => {
-                    deadline = tokio::time::Instant::now() + NEGOTIATION_STALL_TIMEOUT;
-                    let encoded = encode_ice_candidate(
-                        &candidate.candidate,
-                        &candidate.sdp_mid,
-                        &candidate.sdp_mline_index,
-                    );
-                    sig.send(SignalingMessage::IceCandidate {
-                        share_code: share_code.clone(),
-                        candidate: encoded,
-                        sdp_mid: candidate.sdp_mid,
-                        sdp_m_line_index: candidate.sdp_mline_index,
-                        peer_id: peer_id.clone(),
-                    })
-                    .map_err(|e| CoreError::P2P(e.to_string()))?;
-                }
-                Some(state) = state_rx.recv() => {
-                    deadline = tokio::time::Instant::now() + NEGOTIATION_STALL_TIMEOUT;
-                    match state {
-                        RTCIceConnectionState::Connected => {
-                            if rtc::check_relay(&pc).await {
-                                on_event(SenderEvent::RelayDetected);
-                            }
-                            send_single_file(&dc, file_to_send, &on_event).await?;
-                            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-                            break 'negotiation true;
+                    SignalingMessage::IceCandidate { candidate, .. } => {
+                        if let Some((cand, mid, idx)) = decode_ice_candidate(&candidate) {
+                            let init = RTCIceCandidateInit {
+                                candidate: cand,
+                                sdp_mid: mid,
+                                sdp_mline_index: idx,
+                                ..Default::default()
+                            };
+                            let _ = rtc::add_ice_candidate(&pc, init).await;
                         }
-                        RTCIceConnectionState::Failed => {
-                            return Err(CoreError::P2P("ICE connection failed".into()));
-                        }
-                        RTCIceConnectionState::Disconnected => {
-                            on_event(SenderEvent::ReceiverDisconnected);
-                            break 'negotiation false;
-                        }
-                        _ => {}
                     }
+                    SignalingMessage::DownloaderArrived { device_info, .. } => {
+                        on_event(SenderEvent::ReceiverArrived { device_info });
+                    }
+                    SignalingMessage::DownloaderOffline { .. } => {
+                        // Stale relic from any cleanup race; ICE state will surface a
+                        // real drop via Disconnected/Failed.
+                    }
+                    SignalingMessage::TransferComplete { .. } => {
+                        on_event(SenderEvent::TransferComplete);
+                        let _ = pc.close().await;
+                        sig.shutdown();
+                        return Ok(());
+                    }
+                    SignalingMessage::Error { message } => {
+                        return Err(CoreError::P2P(message));
+                    }
+                    _ => {}
                 }
-                _ = tokio::time::sleep_until(deadline) => {
-                    return Err(CoreError::P2P(format!(
-                        "ICE negotiation stalled (no progress for {}s)",
-                        NEGOTIATION_STALL_TIMEOUT.as_secs()
-                    )));
-                }
-                else => break 'negotiation false,
             }
-        };
+            Some(candidate) = ice_rx.recv() => {
+                deadline = tokio::time::Instant::now() + NEGOTIATION_STALL_TIMEOUT;
+                let encoded = encode_ice_candidate(
+                    &candidate.candidate,
+                    &candidate.sdp_mid,
+                    &candidate.sdp_mline_index,
+                );
+                sig.send(SignalingMessage::IceCandidate {
+                    share_code: share_code.clone(),
+                    candidate: encoded,
+                    sdp_mid: candidate.sdp_mid,
+                    sdp_m_line_index: candidate.sdp_mline_index,
+                    peer_id: peer_id.clone(),
+                })
+                .map_err(|e| CoreError::P2P(e.to_string()))?;
+            }
+            Some(state) = state_rx.recv() => {
+                deadline = tokio::time::Instant::now() + NEGOTIATION_STALL_TIMEOUT;
+                match state {
+                    RTCIceConnectionState::Connected => {
+                        if rtc::check_relay(&pc).await {
+                            on_event(SenderEvent::RelayDetected);
+                        }
+                        let file_to_send: &PreparedFile = match &first_file_name {
+                            Some(name) => prepared
+                                .iter()
+                                .find(|f| &f.name == name)
+                                .unwrap_or(&prepared[0]),
+                            None => &prepared[0],
+                        };
+                        send_single_file(&dc, file_to_send, &on_event).await?;
+                        on_event(SenderEvent::WaitingForNext);
+                        break 'negotiation;
+                    }
+                    RTCIceConnectionState::Failed => {
+                        return Err(CoreError::P2P("ICE connection failed".into()));
+                    }
+                    RTCIceConnectionState::Disconnected => {
+                        on_event(SenderEvent::ReceiverDisconnected);
+                        let _ = pc.close().await;
+                        sig.shutdown();
+                        return Ok(());
+                    }
+                    _ => {}
+                }
+            }
+            _ = tokio::time::sleep_until(deadline) => {
+                return Err(CoreError::P2P(format!(
+                    "ICE negotiation stalled (no progress for {}s)",
+                    NEGOTIATION_STALL_TIMEOUT.as_secs()
+                )));
+            }
+            else => {
+                let _ = pc.close().await;
+                sig.shutdown();
+                return Ok(());
+            }
+        }
+    }
 
-        let _ = pc.close().await;
-
-        if !transfer_succeeded {
-            on_event(SenderEvent::Warning(
-                "Connection dropped before file was delivered; waiting for receiver to retry."
-                    .into(),
-            ));
-        } else {
-            on_event(SenderEvent::WaitingForNext);
+    // Steady state: PC+DC are open, ICE is connected. Wait for FileRequests and
+    // stream each requested file on the SAME DC. No re-handshake per file.
+    loop {
+        tokio::select! {
+            Some(msg) = sig.recv() => {
+                match msg {
+                    SignalingMessage::FileRequest { file_name, .. } => {
+                        let file = prepared
+                            .iter()
+                            .find(|f| f.name == file_name)
+                            .unwrap_or(&prepared[0]);
+                        on_event(SenderEvent::FileStart {
+                            name: file.name.clone(),
+                            size: file.size,
+                        });
+                        send_single_file(&dc, file, &on_event).await?;
+                        on_event(SenderEvent::WaitingForNext);
+                    }
+                    SignalingMessage::TransferComplete { .. } => {
+                        on_event(SenderEvent::TransferComplete);
+                        let _ = pc.close().await;
+                        sig.shutdown();
+                        return Ok(());
+                    }
+                    SignalingMessage::DownloaderArrived { device_info, .. } => {
+                        on_event(SenderEvent::ReceiverArrived { device_info });
+                    }
+                    SignalingMessage::DownloaderOffline { .. } => {
+                        on_event(SenderEvent::ReceiverDisconnected);
+                        let _ = pc.close().await;
+                        sig.shutdown();
+                        return Ok(());
+                    }
+                    SignalingMessage::IceCandidate { candidate, .. } => {
+                        // Trickle candidates can still arrive post-Connected.
+                        if let Some((cand, mid, idx)) = decode_ice_candidate(&candidate) {
+                            let init = RTCIceCandidateInit {
+                                candidate: cand,
+                                sdp_mid: mid,
+                                sdp_mline_index: idx,
+                                ..Default::default()
+                            };
+                            let _ = rtc::add_ice_candidate(&pc, init).await;
+                        }
+                    }
+                    SignalingMessage::Error { message } => {
+                        return Err(CoreError::P2P(message));
+                    }
+                    _ => {}
+                }
+            }
+            Some(candidate) = ice_rx.recv() => {
+                let encoded = encode_ice_candidate(
+                    &candidate.candidate,
+                    &candidate.sdp_mid,
+                    &candidate.sdp_mline_index,
+                );
+                sig.send(SignalingMessage::IceCandidate {
+                    share_code: share_code.clone(),
+                    candidate: encoded,
+                    sdp_mid: candidate.sdp_mid,
+                    sdp_m_line_index: candidate.sdp_mline_index,
+                    peer_id: peer_id.clone(),
+                })
+                .map_err(|e| CoreError::P2P(e.to_string()))?;
+            }
+            Some(state) = state_rx.recv() => {
+                match state {
+                    RTCIceConnectionState::Failed => {
+                        return Err(CoreError::P2P("ICE connection failed".into()));
+                    }
+                    RTCIceConnectionState::Disconnected => {
+                        on_event(SenderEvent::ReceiverDisconnected);
+                        let _ = pc.close().await;
+                        sig.shutdown();
+                        return Ok(());
+                    }
+                    _ => {}
+                }
+            }
+            else => {
+                let _ = pc.close().await;
+                sig.shutdown();
+                return Ok(());
+            }
         }
     }
 }

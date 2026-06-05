@@ -79,6 +79,13 @@ pub enum SignalingMessage {
     UploaderCancelled {
         share_code: String,
     },
+    /// Receiver-to-uploader request to send the next file over the already-open
+    /// PeerConnection / DataChannel, instead of tearing the session down and
+    /// renegotiating ICE per file (which would cost 5–15s on a TURN relay).
+    FileRequest {
+        share_code: String,
+        file_name: String,
+    },
     Ping {},
     Pong {},
 }
