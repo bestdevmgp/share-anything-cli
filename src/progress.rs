@@ -1,4 +1,8 @@
-use indicatif::{ProgressBar, ProgressStyle};
+use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
+
+fn throttle_to_one_hz(pb: &ProgressBar) {
+    pb.set_draw_target(ProgressDrawTarget::stderr_with_hz(1));
+}
 
 pub fn create_upload_progress(total_size: u64, file_name: &str) -> ProgressBar {
     let pb = ProgressBar::new(total_size);
@@ -10,6 +14,7 @@ pub fn create_upload_progress(total_size: u64, file_name: &str) -> ProgressBar {
         .progress_chars("██░"),
     );
     pb.set_message(format!("Uploading: {}", file_name));
+    throttle_to_one_hz(&pb);
     pb
 }
 
@@ -27,6 +32,7 @@ pub fn create_download_progress(total_size: u64, file_name: &str) -> ProgressBar
         .progress_chars("██░"),
     );
     pb.set_message(format!("Downloading: {}", file_name));
+    throttle_to_one_hz(&pb);
     pb
 }
 

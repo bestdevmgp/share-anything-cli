@@ -13,8 +13,6 @@ use ratatui::{backend::CrosstermBackend, Terminal};
 use std::io::{self};
 
 pub async fn run(cfg: CliConfig) -> Result<()> {
-    // Restore the terminal before the panic message prints — TerminalGuard::drop only covers
-    // normal exits.
     let prev_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         let _ = crossterm::execute!(std::io::stdout(), crossterm::terminal::LeaveAlternateScreen);
@@ -30,7 +28,6 @@ pub async fn run(cfg: CliConfig) -> Result<()> {
         event::run_loop(&mut terminal, &mut app).await?;
         app.drain_stdout()
     };
-    // TerminalGuard is dropped above, so stdout is safe to write to.
     for line in pending {
         println!("{}", line);
     }
@@ -55,8 +52,6 @@ impl Drop for TerminalGuard {
     }
 }
 
-/// Copy a string to the system clipboard. Returns true on success.
-/// When the `clipboard` feature is disabled, always returns false.
 #[allow(unused_variables)]
 pub fn copy_to_clipboard(s: &str) -> bool {
     #[cfg(feature = "clipboard")]

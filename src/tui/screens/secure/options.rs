@@ -5,7 +5,7 @@ use ratatui::{
     layout::{Constraint, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Gauge, Paragraph},
+    widgets::{Block, Borders, Paragraph},
     Frame,
 };
 use std::path::PathBuf;
@@ -21,11 +21,10 @@ pub(crate) enum Field {
 pub struct FileState {
     pub name: String,
     pub size: u64,
-    /// Bytes sent so far (only meaningful when status is Sending).
     pub sent: u64,
     pub status: FileStatus,
-    /// Timestamp when this file's transfer started (used for speed / ETA).
     pub started_at: Option<std::time::Instant>,
+    pub metrics: crate::format::ThrottledMetrics,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -52,15 +51,11 @@ pub enum Phase {
         file_states: Vec<FileState>,
         receiver_info: Option<String>,
         connected_info: Option<String>,
-        /// Index into file_states of the file currently being sent (None = waiting).
         active_idx: Option<usize>,
         total: u64,
-        started_at: std::time::Instant,
+        cancelled_notice: bool,
         log: Vec<String>,
-        /// ICE picked a TURN relay candidate — flagged so the UI can warn about slower throughput.
         relay_in_use: bool,
-        /// Flipped to `true` after the user presses [c] so the inline "Press [c] to copy"
-        /// hint can morph into a green confirmation in place.
         copied: bool,
         retry: SecureRetry,
     },
@@ -120,15 +115,9 @@ pub fn update(s: &mut State, ev: &Event, ctx: &mut AppCtx) -> ScreenAction {
                         let pw = if pw_text.is_empty() { None } else { Some(pw_text) };
                         start_send(s, pw, ctx)
                     }
-                    // Lowercase 'b' (no modifiers) and Left arrow drop back to the file picker
-                    // so a stray Enter on the picker can be undone. Capital 'B' (Shift+b) is
-                    // deliberately excluded — it still flows into the password field along
-                    // with every other typed character.
                     KeyCode::Char('b') if k.modifiers.is_empty() => ScreenAction::Pop,
                     KeyCode::Left => ScreenAction::Pop,
                     KeyCode::Char(_) if *authenticated => {
-                        // Typing a character while focus is on Submit jumps focus to the
-                        // password field and forwards the keystroke.
                         *focus = Field::Password;
                         password.input(event::ev_to_input(k));
                         ScreenAction::Stay
@@ -182,8 +171,6 @@ pub fn update(s: &mut State, ev: &Event, ctx: &mut AppCtx) -> ScreenAction {
                     }
                     ScreenAction::Stay
                 }
-                // ← / b drop back into the picker so the same selection can be re-sent with
-                // tweaked options. Other confirm keys go home.
                 KeyCode::Left | KeyCode::Char('b') => ScreenAction::Pop,
                 KeyCode::Enter | KeyCode::Esc | KeyCode::Char('q') => ScreenAction::PopToRoot,
                 _ => ScreenAction::Stay,
@@ -229,7 +216,7 @@ fn start_send(s: &mut State, password: Option<String>, ctx: &mut AppCtx) -> Scre
         connected_info: None,
         active_idx: None,
         total: 0,
-        started_at: std::time::Instant::now(),
+        cancelled_notice: false,
         log: vec!["Connecting to signaling server\u{2026}".into()],
         relay_in_use: false,
         copied: false,
@@ -275,7 +262,7 @@ pub fn render(s: &State, f: &mut Frame) {
             connected_info,
             active_idx,
             total,
-            started_at,
+            cancelled_notice,
             log,
             relay_in_use,
             copied,
@@ -290,10 +277,10 @@ pub fn render(s: &State, f: &mut Frame) {
                 *total,
                 receiver_info.as_deref(),
                 connected_info.as_deref(),
-                *started_at,
                 log,
                 *relay_in_use,
                 *copied,
+                *cancelled_notice,
             );
         }
         Phase::Done { share_code, log, copied } => render_done(f, area, share_code, log, *copied),
@@ -312,8 +299,6 @@ fn render_form(
     let inner = card(f, area, "Secure Transfer (P2P)", Color::Cyan);
 
     let options_h: u16 = if authenticated { 4 } else { 2 };
-    // Reserve space for options + submit button + spacers + hints; the file list shrinks
-    // first so they can't be pushed off-screen. Truncated entries collapse into a "…" row.
     let fixed_h: u16 = 1 + 1 + options_h + 1 + 3 + 1; // chunks 0,2,3,4,5,7
     let want_files_h = paths.len() as u16 + 1;
     let max_files_h = inner.height.saturating_sub(fixed_h);
@@ -333,8 +318,6 @@ fn render_form(
 
     render_files_section(f, chunks[1], paths);
     render_options_section(f, chunks[3], password, focus, authenticated);
-    // Always-on Submit — Enter triggers start_send from either field, so the button represents
-    // an always-available action rather than a focus target.
     render_submit_button(f, chunks[5], true);
 
     hints_bar(f, chunks[7], "[Enter] start    [b/\u{2190}] picker    [Esc] cancel");
@@ -381,8 +364,6 @@ fn render_files_section(f: &mut Frame, area: Rect, paths: &[PathBuf]) {
     let mut lines: Vec<Line> = Vec::with_capacity(cap);
     lines.push(section_header(format!("Files ({})", paths.len())));
 
-    // Drop the last visible row to a "…" hint when entries would otherwise be silently cut
-    // off, so the user knows the list is longer than what's shown.
     let visible_rows = cap.saturating_sub(1);
     let total = paths.len();
     let need_overflow = total > visible_rows;
@@ -459,8 +440,6 @@ fn render_options_section(
 
     f.render_widget(Paragraph::new(section_header("Options")), rows[0]);
 
-    // Clone-and-reskin the TextArea so its border reflects focus without mutating the source
-    // (render takes `&TextArea`).
     let pw_focused = focus == Field::Password;
     let (border_color, title_style) = if pw_focused {
         (
@@ -521,8 +500,6 @@ fn render_submit_button(f: &mut Frame, area: Rect, focused: bool) {
 enum StepState {
     Done,
     Active,
-    /// Like Active but the work is intentionally idle (e.g. waiting for the receiver to pick
-    /// the next file). Rendered with a pause glyph instead of the spinner.
     Paused,
     Pending,
 }
@@ -614,6 +591,7 @@ fn step_line(state: StepState, label: &str, detail: Option<&str>) -> Line<'stati
 }
 
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)]
 fn render_running(
     f: &mut Frame,
     area: Rect,
@@ -623,26 +601,22 @@ fn render_running(
     total: u64,
     receiver_info: Option<&str>,
     connected_info: Option<&str>,
-    started_at: std::time::Instant,
     log: &[String],
     relay_in_use: bool,
     copied: bool,
+    cancelled_notice: bool,
 ) {
     let active_file = active_idx.and_then(|i| file_states.get(i));
-    // Big gauge is redundant when there are several files (each row already has its own inline
-    // bar). Only draw it for single-file shares.
-    let show_gauge = file_states.len() <= 1
-        && active_file.map(|f| f.sent > 0).unwrap_or(false);
     let any_done = file_states.iter().any(|f| f.status == FileStatus::Done);
     let show_waiting_banner = active_idx.is_none() && connected_info.is_some() && any_done;
-    let gauge_h: u16 = if show_gauge { 3 } else if show_waiting_banner { 1 } else { 0 };
+    let banner_h: u16 = 1;
 
     let file_list_h = (file_states.len().max(1) + 2) as u16;
 
     let chunks = Layout::vertical([
         Constraint::Length(2),
         Constraint::Length(5),
-        Constraint::Length(gauge_h),
+        Constraint::Length(banner_h),
         Constraint::Length(file_list_h),
         Constraint::Min(5),
         Constraint::Length(1),
@@ -669,9 +643,6 @@ fn render_running(
         StepState::Active
     };
 
-    // Receiver step flips on DownloaderArrived (receiver_info), not on WebRTC PeerMatched.
-    // The WebRTC negotiation happens after the user clicks Download, which conceptually
-    // belongs to the Transferring phase.
     let receiver_state = if receiver_info.is_some() {
         StepState::Done
     } else if share_code.is_some() {
@@ -686,8 +657,6 @@ fn render_running(
     };
     let receiver_detail = receiver_info;
 
-    // Awaiting covers only the *first* request — subsequent idle gaps between files are
-    // handled by the Transferring step's Paused mode below.
     let awaiting_state = if receiver_info.is_none() {
         StepState::Pending
     } else if active_idx.is_some() || any_file_done {
@@ -696,8 +665,6 @@ fn render_running(
         StepState::Active
     };
 
-    // Switches to Paused (⏸) during the gap between two files of a multi-file share so the
-    // user can tell we're waiting on the receiver, not stalled.
     let idle_between =
         active_idx.is_none() && any_file_done && !all_files_done;
     let transferring_state = if all_files_done {
@@ -725,7 +692,6 @@ fn render_running(
     };
     let transferring_detail = transferring_detail_owned.as_deref();
 
-    // Complete is only marked Done when we reach Phase::Done (handled elsewhere).
     let complete_state = StepState::Pending;
 
     let steps = vec![
@@ -737,22 +703,22 @@ fn render_running(
     ];
     f.render_widget(Paragraph::new(steps), chunks[1]);
 
-    if show_gauge {
-        if let Some(af) = active_file {
-            let ratio = if af.size > 0 { (af.sent as f64 / af.size as f64).min(1.0) } else { 0.0 };
-            let label = if let Some(t) = af.started_at {
-                fmt_progress(af.sent, af.size, t)
-            } else {
-                fmt_progress(af.sent, af.size, started_at)
-            };
-            let title = format!(" {} ", af.name);
-            let gauge = Gauge::default()
-                .block(Block::default().borders(Borders::ALL).title(title))
-                .gauge_style(Style::default().fg(Color::Cyan))
-                .ratio(ratio)
-                .label(label);
-            f.render_widget(gauge, chunks[2]);
-        }
+    if cancelled_notice {
+        f.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::raw("  "),
+                Span::styled(
+                    "\u{2717}",
+                    Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+                ),
+                Span::raw(" "),
+                Span::styled(
+                    "Receiver cancelled the download. Waiting for retry\u{2026}",
+                    Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+                ),
+            ])),
+            chunks[2],
+        );
     } else if show_waiting_banner {
         f.render_widget(
             Paragraph::new(Line::from(vec![
@@ -797,19 +763,13 @@ fn render_running(
                     format!("  ({})", crate::format::format_size_u64(fs.size))
                 }
                 FileStatus::Sending => {
-                    let pct = if fs.size > 0 { (fs.sent as f64 / fs.size as f64 * 100.0) as u64 } else { 0 };
-                    if let Some(t) = fs.started_at {
-                        let elapsed = t.elapsed().as_secs_f64().max(0.001);
-                        let rate = fs.sent as f64 / elapsed;
-                        let speed = format!("{}/s", crate::format::format_size_u64(rate as u64));
-                        let eta = if rate > 0.0 && fs.size > fs.sent {
-                            let secs = ((fs.size - fs.sent) as f64 / rate).round() as u64;
-                            format_duration(secs)
-                        } else {
-                            "-".to_string()
-                        };
-                        format!("  {}% \u{00b7} {} \u{00b7} ETA {}", pct, speed, eta)
+                    if fs.metrics.last_refresh_was_done() {
+                        format!(
+                            "  {}% \u{00b7} {} \u{00b7} ETA {}",
+                            fs.metrics.pct, fs.metrics.speed, fs.metrics.eta
+                        )
                     } else {
+                        let pct = if fs.size > 0 { (fs.sent as f64 / fs.size as f64 * 100.0) as u64 } else { 0 };
                         format!("  {}%", pct)
                     }
                 }
@@ -956,43 +916,3 @@ fn render_failed(f: &mut Frame, area: Rect, msg: &str, can_retry: bool) {
     );
 }
 
-fn fmt_progress(done: u64, total: u64, started_at: std::time::Instant) -> String {
-    let elapsed = started_at.elapsed().as_secs_f64().max(0.001);
-    let rate = (done as f64) / elapsed;
-    let pct = if total == 0 {
-        0.0
-    } else {
-        (done as f64 / total as f64) * 100.0
-    };
-    let eta = if rate > 0.0 && total > done {
-        let secs = ((total - done) as f64 / rate).round() as u64;
-        format_duration(secs)
-    } else if total > 0 && done >= total {
-        "done".to_string()
-    } else {
-        "-".to_string()
-    };
-    let speed = if rate > 0.0 {
-        format!("{}/s", crate::format::format_size_u64(rate as u64))
-    } else {
-        "- /s".to_string()
-    };
-    format!(
-        "{:.0}% \u{2022} {} / {} \u{2022} {} \u{2022} ETA {}",
-        pct,
-        crate::format::format_size_u64(done),
-        crate::format::format_size_u64(total),
-        speed,
-        eta
-    )
-}
-
-fn format_duration(secs: u64) -> String {
-    if secs < 60 {
-        format!("{}s", secs)
-    } else if secs < 3600 {
-        format!("{}m {:02}s", secs / 60, secs % 60)
-    } else {
-        format!("{}h {:02}m", secs / 3600, (secs % 3600) / 60)
-    }
-}

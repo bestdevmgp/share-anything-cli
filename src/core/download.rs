@@ -25,8 +25,6 @@ struct CliDownloadCompleteRequest<'a> {
     file_id: &'a str,
 }
 
-/// Fetch from R2 with a client that does NOT carry our `X-Personal-Token` — the presigned
-/// URL is self-authenticating and we don't want the token landing in R2 access logs.
 pub async fn download_share(
     client: &ApiClient,
     code: &str,
@@ -44,10 +42,6 @@ pub async fn download_share(
     if !resp.status().is_success() { return Err(api_error(resp).await); }
     let issued: CliDownloadUrlResponse = resp.json().await?;
 
-    // HTTP/1.1 only so parallel `Range` requests open separate TCP connections instead of
-    // being multiplexed onto a single HTTP/2 stream. Measured equivalent to single-stream
-    // when the network is healthy and a meaningful safety net when single-TCP cwnd ramp-up
-    // is the limiter.
     let r2_client = reqwest::Client::builder()
         .user_agent(format!("share-cli/{}", env!("CARGO_PKG_VERSION")))
         .http1_only()
@@ -77,7 +71,6 @@ pub async fn download_share(
         .await?;
     }
 
-    // Best-effort: the file is already on disk, never fail the download for a bookkeeping ping.
     let _ = client
         .client
         .post(client.url(&format!("/cli/shares/{}/download-complete", code)))
@@ -116,8 +109,6 @@ async fn download_single_stream(
     Ok(())
 }
 
-/// Each worker writes into its own disjoint byte range of the same file, so concurrent
-/// writes are safe on POSIX/Windows without a shared lock.
 async fn download_ranges_parallel(
     r2_client: &reqwest::Client,
     url: &str,
@@ -199,9 +190,6 @@ async fn download_ranges_parallel(
     Ok(())
 }
 
-/// A single TCP connection often can't saturate a fat link (cwnd ramp-up, BDP limits); a
-/// small fan-out closes the gap to what the browser achieves. Small files stay single-stream
-/// because per-request overhead would dominate.
 fn pick_workers(total_size: u64) -> u64 {
     const MEDIUM_MIN: u64 = 50 * 1024 * 1024;
     const LARGE_MIN: u64 = 200 * 1024 * 1024;
@@ -214,8 +202,6 @@ fn pick_workers(total_size: u64) -> u64 {
     }
 }
 
-/// Server-supplied filename is uploader-controlled — strip path components so a
-/// malicious "../etc/passwd" can't escape `output_dir`.
 fn sanitize_file_name(raw: &str, code: &str) -> String {
     let last = raw.rsplit(['/', '\\']).next().unwrap_or("");
     let trimmed = last.trim();
@@ -233,10 +219,6 @@ struct VerifyPasswordRequest<'a> {
     password: &'a str,
 }
 
-/// Verify a password against a share before kicking off the actual download. Returns
-/// `Ok(())` on 200 and a typed `CoreError::Api` with status 401 when the password is
-/// wrong, so callers can show a precise toast instead of leaking it to the post-download
-/// failure path.
 pub async fn verify_password(
     client: &ApiClient,
     code: &str,

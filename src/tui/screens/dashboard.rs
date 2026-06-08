@@ -33,6 +33,8 @@ pub struct State {
     pub downloads_selected: usize,
     pub downloads_load_error: Option<String>,
     pub downloads_table_state: TableState,
+
+    pub update_available: Option<String>,
 }
 
 impl Default for State {
@@ -50,6 +52,7 @@ impl Default for State {
             downloads_selected: 0,
             downloads_load_error: None,
             downloads_table_state: TableState::default(),
+            update_available: None,
         }
     }
 }
@@ -159,11 +162,9 @@ fn execute_action(a: Action, s: &mut State, ctx: &mut AppCtx) -> ScreenAction {
         }
         Action::Delete => {
             if s.items.is_empty() {
-                *ctx.toast = Some(crate::tui::widgets::toast::Toast::warn("No uploads to delete."));
+                *ctx.toast = Some(crate::tui::widgets::toast::Toast::warn("No shares to delete."));
                 ScreenAction::Stay
             } else if s.focus != PanelFocus::Uploads {
-                // Invoking Delete from Actions without an explicit upload selected would be
-                // surprising — move focus into the list and prompt the user.
                 s.focus = PanelFocus::Uploads;
                 s.table_state.select(Some(s.selected));
                 *ctx.toast = Some(crate::tui::widgets::toast::Toast::info(
@@ -189,8 +190,6 @@ fn execute_action(a: Action, s: &mut State, ctx: &mut AppCtx) -> ScreenAction {
     }
 }
 
-/// Open the bulk-delete confirmation if the user is signed in and has shares.
-/// Shared by the Actions-menu entry and the hidden `X` shortcut so they stay in lock-step.
 fn refresh_history(s: &mut State, ctx: &mut AppCtx) -> ScreenAction {
     if !ctx.client.is_authenticated() {
         *ctx.toast = Some(crate::tui::widgets::toast::Toast::warn(
@@ -239,7 +238,6 @@ fn start_delete_all(s: &State, ctx: &mut AppCtx) -> ScreenAction {
     }
 }
 
-/// Cycles Uploads → Downloads → Actions, skipping unreachable panels (unauth, empty list).
 fn cycle_focus_next(s: &mut State, authenticated: bool) {
     let order = [PanelFocus::Uploads, PanelFocus::Downloads, PanelFocus::Actions];
     let start = order.iter().position(|p| *p == s.focus).unwrap_or(0);
@@ -296,9 +294,6 @@ pub fn update(s: &mut State, ev: &Event, ctx: &mut AppCtx) -> ScreenAction {
             ScreenAction::Stay
         }
         KeyCode::Right | KeyCode::Char('l') => {
-            // Spatial: Uploads/Downloads sit in the left column, Actions in the right.
-            // → from either left panel jumps straight to Actions instead of cycling through
-            // the other left panel. From Actions, wrap to the top-left (Uploads).
             match s.focus {
                 PanelFocus::Uploads | PanelFocus::Downloads => {
                     if focus_is_reachable(s, PanelFocus::Actions, authenticated) {
@@ -316,8 +311,6 @@ pub fn update(s: &mut State, ev: &Event, ctx: &mut AppCtx) -> ScreenAction {
             ScreenAction::Stay
         }
         KeyCode::Left | KeyCode::Char('h') => {
-            // Spatial mirror: ← from Actions jumps to the top-left (Uploads). From the left
-            // column, wrap to Actions.
             match s.focus {
                 PanelFocus::Actions => {
                     if focus_is_reachable(s, PanelFocus::Uploads, authenticated) {
@@ -348,7 +341,6 @@ pub fn update(s: &mut State, ev: &Event, ctx: &mut AppCtx) -> ScreenAction {
                     s.table_state.select(Some(s.selected));
                 }
                 PanelFocus::Downloads => {
-                    // ↑ at the top of Downloads jumps into Uploads (visually stacked above).
                     if s.downloads_selected == 0
                         && focus_is_reachable(s, PanelFocus::Uploads, authenticated)
                     {
@@ -372,7 +364,6 @@ pub fn update(s: &mut State, ev: &Event, ctx: &mut AppCtx) -> ScreenAction {
         KeyCode::Down | KeyCode::Char('j') => {
             match s.focus {
                 PanelFocus::Uploads => {
-                    // ↓ at the bottom of Uploads drops into Downloads (stacked below).
                     let at_end = s.selected + 1 >= s.items.len();
                     if at_end && focus_is_reachable(s, PanelFocus::Downloads, authenticated) {
                         s.focus = PanelFocus::Downloads;
@@ -479,6 +470,19 @@ pub fn render(s: &State, f: &mut Frame, client: &ApiClient, toast: Option<&Toast
             Paragraph::new(t.msg.clone()).style(t.style()),
             chunks[2],
         );
+    } else if let Some(latest) = &s.update_available {
+        f.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                format!(
+                    " \u{26a0} A new version (v{}) is available. Run: npm update -g share-anything-cli",
+                    latest
+                ),
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ))),
+            chunks[2],
+        );
     }
 }
 
@@ -563,8 +567,6 @@ fn render_uploads_panel(s: &State, f: &mut Frame, area: Rect) {
         })
         .collect();
 
-    // Two-space header indent matches the data row gutter so REVERSED highlights line up;
-    // the trailing empty cell pads the right edge so Expires doesn't kiss the panel border.
     let header_row = Row::new(vec!["  CODE", "FILE", "SIZE", "EXPIRES", ""])
         .style(Style::default().add_modifier(Modifier::BOLD));
 
@@ -579,7 +581,6 @@ fn render_uploads_panel(s: &State, f: &mut Frame, area: Rect) {
         .header(header_row)
         .highlight_style(Style::default().add_modifier(Modifier::REVERSED));
 
-    // Gate highlight on focus so the REVERSED stripe disappears when the user Tabs away.
     let mut state = TableState::default();
     if focused {
         state.select(Some(s.selected));

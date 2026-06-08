@@ -8,6 +8,7 @@ mod p2p;
 mod progress;
 mod tui;
 pub mod time;
+mod update_check;
 
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
@@ -38,89 +39,64 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Upload files
     Upload {
-        /// Files to upload
         files: Vec<PathBuf>,
 
-        /// Password for download (requires personal token)
         #[arg(short, long)]
         password: Option<String>,
 
-        /// Expiration: 5m, 30m, 1h, 3h, 6h, 12h, 24h (requires personal token)
         #[arg(short, long)]
         expires: Option<String>,
 
-        /// One-time download (requires personal token)
         #[arg(long)]
         one_time: bool,
 
-        /// File name for stdin upload
         #[arg(short, long)]
         name: Option<String>,
 
-        /// Secure transfer (P2P, no server storage)
         #[arg(short, long)]
         secure: bool,
     },
 
-    /// Download a shared file
     Download {
-        /// Share code
         code: String,
 
-        /// Password if required
         #[arg(short, long)]
         password: Option<String>,
 
-        /// Output path
         output: Option<PathBuf>,
 
-        /// Specific file ID to download
         #[arg(long)]
         file_id: Option<String>,
 
-        /// For multi-file shares: bundle every file into a single ZIP archive named
-        /// {code}.zip instead of saving each file individually.
         #[arg(long)]
         zip: bool,
     },
 
-    /// Show file info before downloading
     Info {
-        /// Share code
         code: String,
     },
 
-    /// View your upload history (requires personal token)
     #[command(alias = "list")]
     History,
 
-    /// View your download history (requires personal token)
     #[command(name = "download-history")]
     DownloadHistory,
 
-    /// Delete a share by its code (requires personal token)
     #[command(alias = "remove")]
     Delete {
-        /// Share code to delete
         code: String,
     },
 
-    /// View download logs for a share (requires personal token)
     #[command(alias = "log")]
     Logs {
-        /// Share code to inspect
         code: String,
     },
 
-    /// Save personal token for authenticated access
     Login {
-        /// Personal token (starts with sat_). If omitted, opens browser sign-in
         token: Option<String>,
     },
 
-    /// Remove saved personal token
     Logout,
 }
 
@@ -224,7 +200,6 @@ async fn main() {
         }
 
         if !stdin_tty {
-            // echo hi | share → fall back to `share upload` stdin behavior.
             let cli = Cli::parse_from(["share", "upload"]);
             if let Err(e) = run_cli(cli).await {
                 eprintln!("\x1b[31mError: {}\x1b[0m", e);

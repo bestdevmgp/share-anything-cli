@@ -13,7 +13,6 @@ use std::time::{Duration, Instant};
 
 pub enum Phase {
     Starting,
-    /// Session created; polling status every 2s.
     WaitingDevice {
         session: DeviceSession,
         qr_lines: Vec<String>,
@@ -177,8 +176,6 @@ fn render_waiting(f: &mut Frame, area: Rect, session: &DeviceSession, qr_lines: 
     );
 }
 
-/// Render a QR for `url` as Vec<String>, one line per terminal row.
-/// Uses half-block chars to fit two QR rows per terminal row, matching the CLI version.
 pub fn build_qr_lines(url: &str) -> Vec<String> {
     use qrcode::{EcLevel, QrCode};
     let code = match QrCode::with_error_correction_level(url.as_bytes(), EcLevel::L) {

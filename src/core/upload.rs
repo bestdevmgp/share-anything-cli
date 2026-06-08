@@ -36,7 +36,6 @@ pub struct ShareResult {
 #[derive(Clone, Debug)]
 pub enum FileSource {
     Path(PathBuf),
-    /// In-memory bytes (e.g. stdin upload). Held resident because the source isn't seekable.
     Memory(Bytes),
 }
 
@@ -66,12 +65,9 @@ pub fn read_files(paths: &[PathBuf]) -> Result<Vec<FileEntry>, CoreError> {
     Ok(out)
 }
 
-// Matches the server's R2 part size; files larger than this are split into multiple PUTs.
 const CHUNK_SIZE: i64 = 50 * 1024 * 1024;
 const STREAM_CHUNK: usize = 16384;
 const MAX_CONCURRENT_PARTS: usize = 4;
-// Sweet spot above which syscall savings flatten while TLS records (16 KB) and the
-// TCP send window saturate.
 const READER_BUFFER_CAPACITY: usize = 256 * 1024;
 
 fn progress_stream(
@@ -227,8 +223,6 @@ async fn upload_via_presigned(
         )
         .await?;
 
-        // Empty upload_id means the server skipped S3 multipart-init for this file; the
-        // complete endpoint expects the sentinel "direct" to know not to finalize it on S3.
         let upload_id_str = if file_init.upload_id.is_empty() {
             "direct".to_string()
         } else {

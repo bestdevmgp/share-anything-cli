@@ -76,7 +76,6 @@ pub async fn delete_share(client: &ApiClient, code: &str) -> Result<(), CoreErro
     Ok(())
 }
 
-/// Result of a bulk delete: number of shares deleted, and any individual errors collected.
 pub struct DeleteAllOutcome {
     pub deleted: usize,
     pub failures: Vec<(String, String)>,

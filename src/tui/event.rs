@@ -11,8 +11,6 @@ use tui_textarea::{Input, Key};
 pub enum Event {
     Key(KeyEvent),
     Tick,
-    /// Terminal resize notification. The new dimensions are not carried because consumers
-    /// rely on the next `terminal.draw` to pick up the new size via the backend.
     Resize,
 
     UploadsLoaded(Result<Vec<UploadItem>, CoreError>),
@@ -21,13 +19,7 @@ pub enum Event {
     UploadFinished(Result<ShareResult, CoreError>),
 
     DownloadInfo(Result<FileInfo, CoreError>),
-    /// Outcome of `POST /file/verify-password` issued during the download flow.
-    /// Carries the unit result so the screen can route to `ChoosePath` on success
-    /// or bounce back to `NeedsPassword` with a toast on failure.
     DownloadPasswordVerified(Result<(), CoreError>),
-    /// Timer fired: the brief `Password verified` success state has been on screen long
-    /// enough; advance to `ChoosePath`. Sent by a `sleep` task spawned right after the
-    /// `DownloadPasswordVerified(Ok)` event is handled.
     DownloadPasswordAutoTransition,
     DownloadProgress { delta: u64 },
     DownloadFinished(Result<PathBuf, CoreError>),
@@ -43,13 +35,12 @@ pub enum Event {
 
     P2PSend(crate::core::p2p::sender::SenderEvent),
     P2PReceive(crate::core::p2p::receiver::ReceiverEvent),
+
+    UpdateAvailable(Option<String>),
 }
 
 pub type Tx = mpsc::UnboundedSender<Event>;
 
-/// Returns true if `k` should be forwarded to a share-code TextArea.
-/// Share codes are 6-digit numbers; anything else (letters, symbols, overflow) is rejected.
-/// Editing keys (Backspace, arrows, Home/End, Delete) always pass through.
 pub fn accept_share_code_input(code: &tui_textarea::TextArea, k: &KeyEvent) -> bool {
     match k.code {
         KeyCode::Char(c) => {
@@ -59,7 +50,6 @@ pub fn accept_share_code_input(code: &tui_textarea::TextArea, k: &KeyEvent) -> b
     }
 }
 
-/// Convert a crossterm KeyEvent into a tui_textarea Input.
 pub fn ev_to_input(k: &KeyEvent) -> Input {
     let key = match k.code {
         KeyCode::Char(c) => Key::Char(c),

@@ -204,8 +204,6 @@ fn render_loaded(f: &mut Frame, area: Rect, info: &FileInfo) {
 
     let body_lines_for_protected: u16 = if info.has_password { 5 } else { 0 };
     let files_count = info.files.len() as u16;
-    // For unprotected shares we want header + N file rows, but cap so the section can't
-    // exceed the available card height — render code below collapses overflow to a "…" row.
     let fixed_h: u16 = 1 + 1 + 1 + body_lines_for_protected; // chunks 0,1,2,4
     let want_files_h = if info.has_password { 0 } else { 1 + files_count + 1 };
     let max_files_h = inner.height.saturating_sub(fixed_h);
@@ -292,10 +290,6 @@ fn render_loaded(f: &mut Frame, area: Rect, info: &FileInfo) {
 }
 
 fn visible_width(s: &str) -> usize {
-    // Use terminal display width — CJK characters (Korean / Japanese / Chinese / emoji) take
-    // 2 cells each, while ASCII takes 1. Counting `chars()` instead would treat "한글" as
-    // width 2 even though it actually occupies 4 cells, leaving the size column too short
-    // and pushing the bytes off-screen.
     use unicode_width::UnicodeWidthStr;
     UnicodeWidthStr::width(s)
 }
@@ -306,8 +300,6 @@ fn truncate_middle(s: &str, max: usize) -> String {
     if total <= max || max < 3 {
         return s.to_string();
     }
-    // Reserve one cell for the "…" ellipsis. Walk from each end accumulating display width
-    // until both halves combined would exceed the budget.
     let keep = max - 1;
     let head_budget = keep / 2;
     let tail_budget = keep - head_budget;

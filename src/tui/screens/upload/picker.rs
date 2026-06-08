@@ -28,12 +28,11 @@ pub struct State {
     pub cwd: PathBuf,
     pub entries: Vec<Entry>,
     pub cursor: usize,
-    /// path → file size in bytes (BTreeMap for stable alphabetical iteration/display).
     pub selected: BTreeMap<PathBuf, u64>,
     pub list_state: ListState,
-    /// Anchor for range selection (Shift+Enter). Refers to an Entry row index.
     pub anchor: Option<usize>,
     pub mode: PickerMode,
+    pub last_entries_cursor: usize,
 }
 
 #[derive(Debug)]
@@ -73,6 +72,7 @@ impl State {
             list_state,
             anchor: None,
             mode: PickerMode::Upload,
+            last_entries_cursor: 0,
         })
     }
 
@@ -89,6 +89,7 @@ impl State {
             list_state,
             anchor: None,
             mode: PickerMode::Secure,
+            last_entries_cursor: 0,
         })
     }
 
@@ -99,7 +100,6 @@ impl State {
         self.entries = entries;
         self.cursor = 0;
         self.list_state.select(Some(0));
-        // Anchor refers to a row in the previous directory.
         self.anchor = None;
         Ok(())
     }
@@ -118,7 +118,6 @@ impl State {
         self.selected.remove(path);
     }
 
-    /// Select every file between `anchor` and `cursor` in the Entry rows (inclusive).
     fn range_select(&mut self) {
         let Some(anchor) = self.anchor else {
             let rows = build_rows(self);
@@ -134,7 +133,6 @@ impl State {
         };
         let entries_len = self.entries.len();
         let effective_anchor = if anchor < entries_len { anchor } else {
-            // Anchor points outside entries (e.g. Selected row); fall back to single toggle.
             let rows = build_rows(self);
             if let Some(Row::Entry { idx }) = rows.get(self.cursor).map(|r| match r {
                 Row::Entry { idx } => Row::Entry { idx: *idx },
@@ -172,7 +170,6 @@ impl State {
         self.anchor = Some(self.cursor);
     }
 
-    /// After mutating `selected`, clamp cursor and skip Separator.
     fn clamp_cursor_after_selection_change(&mut self) {
         let rows = build_rows(self);
         let max = rows.len().saturating_sub(1);
@@ -210,7 +207,6 @@ fn cursor_absolute_path(s: &State, rows: &[Row]) -> String {
     }
 }
 
-/// Anchor-to-cursor range selection. Shared by Shift+Enter and the `r` shortcut.
 fn trigger_range_select(s: &mut State, ctx: &mut AppCtx, rows: &[Row]) {
     match rows.get(s.cursor) {
         Some(Row::Entry { idx }) => {
@@ -238,8 +234,6 @@ pub fn update(s: &mut State, ev: &Event, ctx: &mut AppCtx) -> ScreenAction {
 
     let rows = build_rows(s);
 
-    // Most terminals don't distinguish Shift+Enter from Enter; the `r` fallback below covers
-    // those cases.
     if matches!(k.code, KeyCode::Enter) && k.modifiers.contains(KeyModifiers::SHIFT) {
         trigger_range_select(s, ctx, &rows);
         return ScreenAction::Stay;
@@ -247,6 +241,21 @@ pub fn update(s: &mut State, ev: &Event, ctx: &mut AppCtx) -> ScreenAction {
 
     match k.code {
         KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('b') => ScreenAction::Pop,
+
+        KeyCode::Tab => {
+            let entries_len = s.entries.len();
+            let in_entries = s.cursor < entries_len;
+            let in_selected = s.cursor > entries_len && !s.selected.is_empty();
+            if in_entries && !s.selected.is_empty() {
+                s.last_entries_cursor = s.cursor;
+                s.cursor = entries_len + 1;
+                s.list_state.select(Some(s.cursor));
+            } else if in_selected && entries_len > 0 {
+                s.cursor = s.last_entries_cursor.min(entries_len - 1);
+                s.list_state.select(Some(s.cursor));
+            }
+            ScreenAction::Stay
+        }
 
         KeyCode::Char('r') => {
             trigger_range_select(s, ctx, &rows);
@@ -435,7 +444,6 @@ pub fn render(s: &State, f: &mut Frame) {
     let rows = build_rows(s);
     let cursor_path = cursor_absolute_path(s, &rows);
 
-    // Cap Selected at half the body so Files always has room.
     let selected_count = s.selected.len() as u16;
     let body_area = outer[1];
     let selected_box_h: u16 = if selected_count > 0 {
@@ -534,8 +542,8 @@ pub fn render(s: &State, f: &mut Frame) {
         crate::format::format_size_u64(total)
     );
     let hints = match s.mode {
-        PickerMode::Upload => " [↑↓]move  [space/enter]toggle  [enter]open  [r]range  [←/→]dir  [u]upload  [q/b]cancel ",
-        PickerMode::Secure => " [↑↓]move  [space/enter]toggle  [enter]open  [r]range  [←/→]dir  [u]confirm  [q/b]cancel ",
+        PickerMode::Upload => " [↑↓]move  [tab]switch  [space/enter]toggle  [enter]open  [r]range  [←/→]dir  [u]upload  [q/b]cancel ",
+        PickerMode::Secure => " [↑↓]move  [tab]switch  [space/enter]toggle  [enter]open  [r]range  [←/→]dir  [u]confirm  [q/b]cancel ",
     };
     let body = Paragraph::new(vec![
         Line::from(Span::styled(summary, Style::default().add_modifier(Modifier::BOLD))),

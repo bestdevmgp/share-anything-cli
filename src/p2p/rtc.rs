@@ -1,12 +1,14 @@
 use crate::client::ApiClient;
 use crate::error::{CliError, Result};
 use serde::Deserialize;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, Notify};
 use webrtc::api::APIBuilder;
 use webrtc::data_channel::RTCDataChannel;
 use webrtc::ice_transport::ice_candidate::RTCIceCandidateInit;
 use webrtc::ice_transport::ice_connection_state::RTCIceConnectionState;
+
 use webrtc::ice_transport::ice_server::RTCIceServer;
 use webrtc::peer_connection::configuration::RTCConfiguration;
 use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
@@ -76,7 +78,6 @@ pub async fn fetch_ice_servers(client: &ApiClient) -> Result<Vec<RTCIceServer>> 
 pub async fn create_peer_connection(
     ice_servers: Vec<RTCIceServer>,
 ) -> Result<Arc<RTCPeerConnection>> {
-    // DataChannel-only: no audio/video codecs or interceptors needed.
     let api = APIBuilder::new().build();
 
     let config = RTCConfiguration {
@@ -86,6 +87,35 @@ pub async fn create_peer_connection(
 
     let pc = api.new_peer_connection(config).await?;
     Ok(Arc::new(pc))
+}
+
+#[derive(Clone)]
+pub struct DcCloseSignal {
+    pub alive: Arc<AtomicBool>,
+    pub closed: Arc<Notify>,
+}
+
+impl DcCloseSignal {
+    pub fn is_closed(&self) -> bool {
+        !self.alive.load(Ordering::SeqCst)
+    }
+}
+
+pub async fn setup_data_channel_close_signal(dc: &Arc<RTCDataChannel>) -> DcCloseSignal {
+    let signal = DcCloseSignal {
+        alive: Arc::new(AtomicBool::new(true)),
+        closed: Arc::new(Notify::new()),
+    };
+    let alive = signal.alive.clone();
+    let closed = signal.closed.clone();
+    dc.on_close(Box::new(move || {
+        alive.store(false, Ordering::SeqCst);
+        let closed = closed.clone();
+        Box::pin(async move {
+            closed.notify_one();
+        })
+    }));
+    signal
 }
 
 pub async fn create_data_channel(pc: &Arc<RTCPeerConnection>) -> Result<Arc<RTCDataChannel>> {
@@ -150,9 +180,6 @@ pub async fn add_ice_candidate(pc: &Arc<RTCPeerConnection>, candidate: RTCIceCan
     Ok(())
 }
 
-/// Returns true when at least one ICE candidate is a TURN relay, so UI layers can surface
-/// "TURN relay in use" out-of-band rather than writing to stdout (which would corrupt the
-/// TUI alternate screen).
 pub async fn check_relay(pc: &Arc<RTCPeerConnection>) -> bool {
     let stats = pc.get_stats().await;
     for (_, stat) in stats.reports.iter() {

@@ -26,6 +26,7 @@ pub struct SecureFileState {
     pub received: u64,
     pub status: SecureFileStatus,
     pub started_at: Option<std::time::Instant>,
+    pub metrics: crate::format::ThrottledMetrics,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -59,17 +60,9 @@ pub enum Phase {
     NeedsPassword {
         info: FileInfo,
         password: TextArea<'static>,
-        /// Inline error shown in red below the password field. Set by the verify
-        /// callback when the previous attempt was wrong; cleared the moment the user
-        /// edits the field so the warning doesn't linger after a correction.
         error: Option<String>,
     },
-    /// `POST /file/verify-password` in flight. The password is held so we can stuff it
-    /// into `ChoosePath` once the server confirms it, without making the user retype.
     VerifyingPassword { info: FileInfo, password: String },
-    /// Server confirmed the password. We linger here for a short beat so the user sees
-    /// the success state in the same spot where `Verifying password...` was spinning,
-    /// then auto-advance to `ChoosePath`.
     PasswordVerified { info: FileInfo, password: String },
     ChoosePath {
         info: FileInfo,
@@ -84,6 +77,7 @@ pub enum Phase {
         target_display: String,
         started_at: std::time::Instant,
         retry: DownloadRetry,
+        metrics: crate::format::ThrottledMetrics,
     },
     RunningEach {
         info: FileInfo,
@@ -95,6 +89,7 @@ pub enum Phase {
         saved_files: Vec<PathBuf>,
         started_at: std::time::Instant,
         retry: DownloadRetry,
+        metrics: crate::format::ThrottledMetrics,
     },
     SecureRunning {
         share_code: String,
@@ -129,8 +124,6 @@ impl State {
     }
 }
 
-/// Directory picker for the save-path step. Built fresh from the user's current working
-/// directory in `app.rs`'s `DownloadInfo` handler.
 pub struct PathPicker {
     pub cwd: PathBuf,
     pub entries: Vec<PathBuf>,
@@ -146,7 +139,6 @@ impl PathPicker {
         Self { cwd, entries, cursor: 0 }
     }
 
-    /// Row layout: 0 = "Save here", 1.. = subdirs. Parent navigation is keyboard-only (←/h).
     fn rows_len(&self) -> usize {
         1 + self.entries.len()
     }
@@ -270,9 +262,6 @@ pub fn update(s: &mut State, ev: &Event, ctx: &mut AppCtx) -> ScreenAction {
             }
         }
         Phase::VerifyingPassword { .. } => {
-            // Block all input while the verify request is in flight — Esc still pops the
-            // screen so the user is never stuck. The pending task's abort handle is in
-            // `ctx.tasks` so it gets cancelled with the screen.
             if let Event::Key(k) = ev {
                 if k.code == KeyCode::Esc {
                     return ScreenAction::Pop;
@@ -281,8 +270,6 @@ pub fn update(s: &mut State, ev: &Event, ctx: &mut AppCtx) -> ScreenAction {
             ScreenAction::Stay
         }
         Phase::PasswordVerified { .. } => {
-            // Brief success state before the auto-transition fires. Swallow all keys so
-            // a stray Enter can't accidentally pop the screen during the linger.
             ScreenAction::Stay
         }
         Phase::ChoosePath { picker, mode, info, .. } => {
@@ -321,8 +308,6 @@ pub fn update(s: &mut State, ev: &Event, ctx: &mut AppCtx) -> ScreenAction {
                     }
                 }
                 KeyCode::Right | KeyCode::Char('l') => {
-                    // Right arrow / l = "enter directory" only. Save here is Enter-only so a
-                    // stray right arrow can't commit the download to the wrong location.
                     if picker.cursor > 0 {
                         let entry_idx = picker.cursor - 1;
                         if let Some(target) = picker.entries.get(entry_idx).cloned() {
@@ -390,7 +375,6 @@ pub fn update(s: &mut State, ev: &Event, ctx: &mut AppCtx) -> ScreenAction {
                     }
                 }
                 KeyCode::Enter | KeyCode::Esc | KeyCode::Char('q') | KeyCode::Left | KeyCode::Char('b') => {
-                    // Reset to the code-input step so a typo can be corrected in place.
                     let mut code = TextArea::default();
                     code.set_placeholder_text("123456");
                     code.set_block(Block::default().borders(Borders::ALL).title(" Share code "));
@@ -494,6 +478,7 @@ fn start_single_or_p2p(
                 received: 0,
                 status: SecureFileStatus::Pending,
                 started_at: None,
+                metrics: crate::format::ThrottledMetrics::default(),
             })
             .collect();
         let _ = total;
@@ -574,6 +559,7 @@ fn start_single_or_p2p(
         target_display,
         started_at: std::time::Instant::now(),
         retry,
+        metrics: crate::format::ThrottledMetrics::default(),
     };
     ScreenAction::Stay
 }
@@ -624,8 +610,6 @@ fn start_each(
             match r {
                 Ok(path) => {
                     saved.push(path.clone());
-                    // The final completion goes through DownloadEachFinished — only emit
-                    // advance for the in-between files.
                     if idx + 1 < info_for_task.files.len() {
                         let _ = tx.send(Event::DownloadEachAdvance { idx, saved: path });
                     }
@@ -650,6 +634,7 @@ fn start_each(
         saved_files: vec![],
         started_at: std::time::Instant::now(),
         retry,
+        metrics: crate::format::ThrottledMetrics::default(),
     };
     ScreenAction::Stay
 }
@@ -672,7 +657,6 @@ fn start_zip(
         output_dir: output_dir.clone(),
     };
     let code = info.share_code.clone();
-    // ZIP content-length is unknown ahead of time — sum of file sizes is a rough denominator.
     let target_total: u64 = info.files.iter().map(|f| f.file_size.max(0) as u64).sum();
     let target_display = format!("share-{}.zip", code);
     let file_ids: Vec<String> = info.files.iter().map(|f| f.id.clone()).collect();
@@ -704,6 +688,7 @@ fn start_zip(
         target_display,
         started_at: std::time::Instant::now(),
         retry,
+        metrics: crate::format::ThrottledMetrics::default(),
     };
     ScreenAction::Stay
 }
@@ -721,13 +706,13 @@ pub fn render(s: &State, f: &mut Frame) {
         Phase::ChoosePath { info, picker, mode, .. } => {
             render_choose_path(f, area, info, picker, *mode)
         }
-        Phase::Running { info, received, total, target_display, started_at, .. } => {
-            render_running(f, area, info, *received, *total, target_display, *started_at)
+        Phase::Running { info, received, total, target_display, started_at, metrics, .. } => {
+            render_running(f, area, info, *received, *total, target_display, *started_at, metrics)
         }
-        Phase::RunningEach { info, current_idx, file_received, file_total, total_received, total_total, started_at, .. } => {
+        Phase::RunningEach { info, current_idx, file_received, file_total, total_received, total_total, started_at, metrics, .. } => {
             render_running_each(
                 f, area, info, *current_idx, *file_received, *file_total,
-                *total_received, *total_total, *started_at,
+                *total_received, *total_total, *started_at, metrics,
             )
         }
         Phase::SecureRunning { share_code, connected_info, file_states, active_idx, started_at, log, .. } => {
@@ -775,7 +760,6 @@ pub(crate) fn render_info_bar(f: &mut Frame, area: Rect, info: &FileInfo) {
             Span::raw("   "),
         ]
     };
-    // P2P doesn't support One-time; swap that chip for a "Secure transfer" mode badge.
     if is_p2p {
         spans.extend(chip("Mode", "Secure transfer", Color::Cyan));
     }
@@ -940,8 +924,6 @@ fn render_verifying_password(f: &mut Frame, area: Rect, info: &FileInfo) {
     ])
     .split(inner);
     render_info_bar(f, chunks[1], info);
-    // Center the spinner line vertically inside the 3-row box so it sits on the same
-    // baseline as the password input would.
     let centered = Layout::vertical([
         Constraint::Length(1),
         Constraint::Length(1),
@@ -963,9 +945,6 @@ fn render_verifying_password(f: &mut Frame, area: Rect, info: &FileInfo) {
     hints(f, chunks[5], "[Esc] cancel");
 }
 
-/// Same layout footprint as `render_verifying_password` — we just swap the spinner line
-/// for the green success indicator so it stays in the exact position the spinner
-/// occupied. Held briefly before auto-advancing to `ChoosePath`.
 fn render_password_verified(f: &mut Frame, area: Rect, info: &FileInfo) {
     let inner = card(f, area, "Download", Color::Cyan);
     let chunks = Layout::vertical([
@@ -1011,8 +990,6 @@ fn render_choose_path(
     let toggle_visible = info.files.len() > 1 && info.transfer_type.as_deref() != Some("p2p");
     let mode_h: u16 = if toggle_visible { 1 } else { 0 };
     let gap_h: u16 = if toggle_visible { 1 } else { 0 };
-    // Picker needs room to navigate even with many files — file list shrinks first, then
-    // shows "+N more"; FILES_SOFT_CAP also stops the list dominating tall terminals.
     const PICKER_MIN: u16 = 8;
     const FILES_SOFT_CAP: u16 = 12;
     let fixed_h: u16 = 1 + 1 + 1 + 1 + mode_h + gap_h + 1 + 1;
@@ -1082,9 +1059,6 @@ fn render_picker(f: &mut Frame, area: Rect, picker: &PathPicker) {
     let inner = block.inner(area);
     f.render_widget(block, area);
 
-    // Per-row cursor styling: Save here lights up cyan (its dedicated accent), directory
-    // rows just invert (the default file-picker highlight). We compose the styles by hand
-    // because `List::highlight_style` only takes one style for the whole list.
     let mut items: Vec<ListItem> = Vec::new();
 
     let save_here_item = if picker.cursor == 0 {
@@ -1124,34 +1098,33 @@ fn render_picker(f: &mut Frame, area: Rect, picker: &PathPicker) {
         }
     }
 
-    // Keep state.select so ratatui scrolls the cursor row into view, but suppress its
-    // built-in highlight since we already painted the cursor row above.
     let list = List::new(items).highlight_style(Style::default());
     let mut state = ListState::default();
     state.select(Some(picker.cursor));
     f.render_stateful_widget(list, inner, &mut state);
 }
 
-fn fmt_progress(done: u64, total: u64, started_at: std::time::Instant) -> String {
-    let elapsed = started_at.elapsed().as_secs_f64().max(0.001);
-    let rate = (done as f64) / elapsed;
-    let pct = if total == 0 { 0.0 } else { (done as f64 / total as f64) * 100.0 };
-    let eta = if rate > 0.0 && total > done {
-        let secs = ((total - done) as f64 / rate).round() as u64;
-        format_duration(secs)
-    } else if total > 0 && done >= total {
-        "done".to_string()
+fn throttled_label(
+    done: u64,
+    total: u64,
+    metrics: &crate::format::ThrottledMetrics,
+) -> String {
+    let live_pct = if total == 0 { 0.0 } else { (done as f64 / total as f64) * 100.0 };
+    let (speed, eta) = if metrics.last_refresh_was_done() {
+        (
+            metrics.speed.clone(),
+            if total > 0 && done >= total {
+                "done".to_string()
+            } else {
+                metrics.eta.clone()
+            },
+        )
     } else {
-        "-".to_string()
-    };
-    let speed = if rate > 0.0 {
-        format!("{}/s", crate::format::format_size_u64(rate as u64))
-    } else {
-        "- /s".to_string()
+        ("- /s".to_string(), "-".to_string())
     };
     format!(
         "{:.0}% \u{2022} {} / {} \u{2022} {} \u{2022} ETA {}",
-        pct,
+        live_pct,
         crate::format::format_size_u64(done),
         crate::format::format_size_u64(total),
         speed,
@@ -1159,15 +1132,6 @@ fn fmt_progress(done: u64, total: u64, started_at: std::time::Instant) -> String
     )
 }
 
-fn format_duration(secs: u64) -> String {
-    if secs < 60 {
-        format!("{}s", secs)
-    } else if secs < 3600 {
-        format!("{}m {:02}s", secs / 60, secs % 60)
-    } else {
-        format!("{}h {:02}m", secs / 3600, (secs % 3600) / 60)
-    }
-}
 
 fn render_running(
     f: &mut Frame,
@@ -1176,7 +1140,8 @@ fn render_running(
     received: u64,
     total: u64,
     target_display: &str,
-    started_at: std::time::Instant,
+    _started_at: std::time::Instant,
+    metrics: &crate::format::ThrottledMetrics,
 ) {
     let inner = card(f, area, "Downloading", Color::Cyan);
     let chunks = Layout::vertical([
@@ -1202,7 +1167,7 @@ fn render_running(
         chunks[1],
     );
     let ratio = if total == 0 { 0.0 } else { (received as f64 / total as f64).min(1.0) };
-    let label = fmt_progress(received, total, started_at);
+    let label = throttled_label(received, total, metrics);
     let gauge = Gauge::default()
         .block(
             Block::default()
@@ -1349,19 +1314,13 @@ fn render_secure_running_dl(
                     format!("  ({})", crate::format::format_size_u64(fs.size))
                 }
                 SecureFileStatus::Receiving => {
-                    let pct = if fs.size > 0 { (fs.received as f64 / fs.size as f64 * 100.0) as u64 } else { 0 };
-                    if let Some(t) = fs.started_at {
-                        let elapsed = t.elapsed().as_secs_f64().max(0.001);
-                        let rate = fs.received as f64 / elapsed;
-                        let speed = format!("{}/s", crate::format::format_size_u64(rate as u64));
-                        let eta = if rate > 0.0 && fs.size > fs.received {
-                            let secs = ((fs.size - fs.received) as f64 / rate).round() as u64;
-                            format_duration(secs)
-                        } else {
-                            "-".to_string()
-                        };
-                        format!("  {}% \u{00b7} {} \u{00b7} ETA {}", pct, speed, eta)
+                    if fs.metrics.last_refresh_was_done() {
+                        format!(
+                            "  {}% \u{00b7} {} \u{00b7} ETA {}",
+                            fs.metrics.pct, fs.metrics.speed, fs.metrics.eta
+                        )
                     } else {
+                        let pct = if fs.size > 0 { (fs.received as f64 / fs.size as f64 * 100.0) as u64 } else { 0 };
                         format!("  {}%", pct)
                     }
                 }
@@ -1480,7 +1439,8 @@ fn render_running_each(
     file_total: u64,
     total_received: u64,
     total_total: u64,
-    started_at: std::time::Instant,
+    _started_at: std::time::Instant,
+    metrics: &crate::format::ThrottledMetrics,
 ) {
     let inner = card(f, area, "Downloading", Color::Cyan);
     let chunks = Layout::vertical([
@@ -1517,7 +1477,7 @@ fn render_running_each(
     );
 
     let file_ratio = if file_total == 0 { 0.0 } else { (file_received as f64 / file_total as f64).min(1.0) };
-    let file_label = fmt_progress(file_received, file_total, started_at);
+    let file_label = throttled_label(file_received, file_total, metrics);
     let file_gauge = Gauge::default()
         .block(
             Block::default()
@@ -1531,7 +1491,7 @@ fn render_running_each(
     f.render_widget(file_gauge, chunks[3]);
 
     let total_ratio = if total_total == 0 { 0.0 } else { (total_received as f64 / total_total as f64).min(1.0) };
-    let total_label = fmt_progress(total_received, total_total, started_at);
+    let total_label = throttled_label(total_received, total_total, metrics);
     let total_gauge = Gauge::default()
         .block(
             Block::default()

@@ -36,8 +36,6 @@ pub async fn run(
         format!("{} files", entries.len())
     };
 
-    // pb is created on InitDone; the lazy branch in on_progress is a safety net in case a
-    // chunk somehow arrives first.
     let pb_slot: Arc<Mutex<Option<ProgressBar>>> = Arc::new(Mutex::new(None));
     let spinner_slot: Arc<Mutex<Option<ProgressBar>>> = Arc::new(Mutex::new(None));
 

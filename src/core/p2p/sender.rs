@@ -12,6 +12,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::io::AsyncReadExt;
 use tokio::sync::{mpsc, Notify};
+use webrtc::data_channel::data_channel_state::RTCDataChannelState;
 use webrtc::data_channel::RTCDataChannel;
 use webrtc::ice_transport::ice_candidate::RTCIceCandidateInit;
 use webrtc::ice_transport::ice_connection_state::RTCIceConnectionState;
@@ -21,28 +22,16 @@ pub type SenderEventFn = Arc<dyn Fn(SenderEvent) + Send + Sync>;
 
 #[derive(Debug, Clone)]
 pub enum SenderEvent {
-    /// Share session created on the server.
     Created { share_code: String, files: Vec<FileSummary> },
-    /// Receiver opened the share page (but transfer hasn't begun yet).
     ReceiverArrived { device_info: Option<String> },
-    /// Receiver matched and WebRTC negotiation starting.
     PeerMatched { device_info: Option<String> },
-    /// A specific file is starting to transfer.
     FileStart { name: String, size: u64 },
-    /// More bytes sent for the current file.
     Progress { delta: u64 },
-    /// Current file finished; waiting for the receiver to request the next file.
     FileEnd,
-    /// File sent; session is alive but idle — waiting for the next receiver request.
     WaitingForNext,
-    /// Receiver explicitly ended the session (Done click forwarded from server).
     TransferComplete,
-    /// Receiver disconnected mid-flight.
-    ReceiverDisconnected,
-    /// ICE selected a TURN relay candidate — bytes are going through a relay, expect slower
-    /// throughput.
+    ReceiverCancelled,
     RelayDetected,
-    /// Fatal transfer failure.
     Failed(String),
 }
 
@@ -84,10 +73,7 @@ struct P2PCreateResponse {
 }
 
 pub enum PreparedFileSource {
-    /// File on disk — opened and read in chunks at send time.
     Path(PathBuf),
-    /// In-memory bytes (e.g., stdin upload). Kept resident because the source
-    /// is not seekable.
     Memory(Vec<u8>),
 }
 
@@ -167,11 +153,8 @@ pub async fn run(
     })
     .map_err(|e| CoreError::P2P(e.to_string()))?;
 
-    // Single PC + DC + WS for the entire session. After the first PeerMatched the
-    // receiver requests every subsequent file via `SignalingMessage::FileRequest`
-    // on the same WS; the uploader streams each file on the same DC. This drops
-    // per-file dead time from "full ICE handshake" (5–15s on a TURN relay) to
-    // "one signaling RTT".
+    'session: loop {
+
     let (first_file_name, first_device_info) = loop {
         match sig.recv().await {
             Some(SignalingMessage::DownloaderArrived { device_info, .. }) => {
@@ -203,6 +186,7 @@ pub async fn run(
     let dc = rtc::create_data_channel(&pc)
         .await
         .map_err(|e| CoreError::P2P(e.to_string()))?;
+    let dc_signal = rtc::setup_data_channel_close_signal(&dc).await;
 
     let (ice_tx, mut ice_rx) = mpsc::unbounded_channel::<RTCIceCandidateInit>();
     let (state_tx, mut state_rx) = mpsc::unbounded_channel::<RTCIceConnectionState>();
@@ -219,13 +203,10 @@ pub async fn run(
     })
     .map_err(|e| CoreError::P2P(e.to_string()))?;
 
-    // Negotiation stall guard: ICE typically completes within seconds (≤15s even
-    // on a TURN-only relay). Anything (msg, ICE, state) resets the deadline.
     const NEGOTIATION_STALL_TIMEOUT: std::time::Duration =
         std::time::Duration::from_secs(60);
     let mut deadline = tokio::time::Instant::now() + NEGOTIATION_STALL_TIMEOUT;
 
-    // First-file ICE handshake + first-file send happens here.
     'negotiation: loop {
         tokio::select! {
             Some(msg) = sig.recv() => {
@@ -253,8 +234,6 @@ pub async fn run(
                         on_event(SenderEvent::ReceiverArrived { device_info });
                     }
                     SignalingMessage::DownloaderOffline { .. } => {
-                        // Stale relic from any cleanup race; ICE state will surface a
-                        // real drop via Disconnected/Failed.
                     }
                     SignalingMessage::TransferComplete { .. } => {
                         on_event(SenderEvent::TransferComplete);
@@ -298,38 +277,53 @@ pub async fn run(
                                 .unwrap_or(&prepared[0]),
                             None => &prepared[0],
                         };
-                        send_single_file(&dc, file_to_send, &on_event).await?;
+                        if send_single_file(&dc, file_to_send, &on_event, &dc_signal).await.is_err() {
+                            on_event(SenderEvent::ReceiverCancelled);
+                            let _ = pc.close().await;
+                            continue 'session;
+                        }
                         on_event(SenderEvent::WaitingForNext);
                         break 'negotiation;
                     }
-                    RTCIceConnectionState::Failed => {
-                        return Err(CoreError::P2P("ICE connection failed".into()));
+                    RTCIceConnectionState::Failed
+                    | RTCIceConnectionState::Closed => {
+                        on_event(SenderEvent::ReceiverCancelled);
+                        let _ = pc.close().await;
+                        continue 'session;
                     }
                     RTCIceConnectionState::Disconnected => {
-                        on_event(SenderEvent::ReceiverDisconnected);
-                        let _ = pc.close().await;
-                        sig.shutdown();
-                        return Ok(());
                     }
                     _ => {}
                 }
             }
             _ = tokio::time::sleep_until(deadline) => {
-                return Err(CoreError::P2P(format!(
-                    "ICE negotiation stalled (no progress for {}s)",
-                    NEGOTIATION_STALL_TIMEOUT.as_secs()
-                )));
+                on_event(SenderEvent::ReceiverCancelled);
+                let _ = pc.close().await;
+                continue 'session;
+            }
+            _ = dc_signal.closed.notified() => {
+                on_event(SenderEvent::ReceiverCancelled);
+                let _ = pc.close().await;
+                continue 'session;
+            }
+            _ = tokio::time::sleep(std::time::Duration::from_secs(2)) => {
+                let st = dc.ready_state();
+                if st != RTCDataChannelState::Open
+                    && st != RTCDataChannelState::Connecting
+                {
+                    on_event(SenderEvent::ReceiverCancelled);
+                    let _ = pc.close().await;
+                    continue 'session;
+                }
             }
             else => {
                 let _ = pc.close().await;
-                sig.shutdown();
-                return Ok(());
+                continue 'session;
             }
         }
     }
 
-    // Steady state: PC+DC are open, ICE is connected. Wait for FileRequests and
-    // stream each requested file on the SAME DC. No re-handshake per file.
+
     loop {
         tokio::select! {
             Some(msg) = sig.recv() => {
@@ -343,7 +337,11 @@ pub async fn run(
                             name: file.name.clone(),
                             size: file.size,
                         });
-                        send_single_file(&dc, file, &on_event).await?;
+                        if let Err(_e) = send_single_file(&dc, file, &on_event, &dc_signal).await {
+                            on_event(SenderEvent::ReceiverCancelled);
+                            let _ = pc.close().await;
+                            continue 'session;
+                        }
                         on_event(SenderEvent::WaitingForNext);
                     }
                     SignalingMessage::TransferComplete { .. } => {
@@ -356,13 +354,11 @@ pub async fn run(
                         on_event(SenderEvent::ReceiverArrived { device_info });
                     }
                     SignalingMessage::DownloaderOffline { .. } => {
-                        on_event(SenderEvent::ReceiverDisconnected);
+                        on_event(SenderEvent::ReceiverCancelled);
                         let _ = pc.close().await;
-                        sig.shutdown();
-                        return Ok(());
+                        continue 'session;
                     }
                     SignalingMessage::IceCandidate { candidate, .. } => {
-                        // Trickle candidates can still arrive post-Connected.
                         if let Some((cand, mid, idx)) = decode_ice_candidate(&candidate) {
                             let init = RTCIceCandidateInit {
                                 candidate: cand,
@@ -396,35 +392,68 @@ pub async fn run(
             }
             Some(state) = state_rx.recv() => {
                 match state {
-                    RTCIceConnectionState::Failed => {
-                        return Err(CoreError::P2P("ICE connection failed".into()));
+                    RTCIceConnectionState::Failed
+                    | RTCIceConnectionState::Closed => {
+                        on_event(SenderEvent::ReceiverCancelled);
+                        let _ = pc.close().await;
+                        continue 'session;
                     }
                     RTCIceConnectionState::Disconnected => {
-                        on_event(SenderEvent::ReceiverDisconnected);
-                        let _ = pc.close().await;
-                        sig.shutdown();
-                        return Ok(());
                     }
                     _ => {}
                 }
             }
+            _ = dc_signal.closed.notified() => {
+                on_event(SenderEvent::ReceiverCancelled);
+                let _ = pc.close().await;
+                continue 'session;
+            }
+            _ = tokio::time::sleep(std::time::Duration::from_secs(2)) => {
+                let st = dc.ready_state();
+                if st != RTCDataChannelState::Open {
+                    on_event(SenderEvent::ReceiverCancelled);
+                    let _ = pc.close().await;
+                    continue 'session;
+                }
+            }
             else => {
                 let _ = pc.close().await;
-                sig.shutdown();
-                return Ok(());
+                continue 'session;
             }
         }
     }
+
+    } // 'session loop
 }
 
-/// Send exactly one file over an already-open DataChannel.
 async fn send_single_file(
     dc: &Arc<RTCDataChannel>,
     file: &PreparedFile,
     on_event: &SenderEventFn,
+    dc_signal: &rtc::DcCloseSignal,
 ) -> Result<(), CoreError> {
+
+    macro_rules! send_with_timeout {
+        ($fut:expr) => {{
+            match tokio::time::timeout(std::time::Duration::from_secs(3), $fut).await {
+                Ok(Ok(_)) => {}
+                Ok(Err(e)) => {
+                    return Err(CoreError::P2P(e.to_string()));
+                }
+                Err(_) => {
+                    return Err(CoreError::P2P(
+                        "Receiver disconnected mid-transfer".into(),
+                    ));
+                }
+            }
+        }};
+    }
+
     let start = std::time::Instant::now();
     loop {
+        if dc_signal.is_closed() {
+            return Err(CoreError::P2P("Receiver disconnected before transfer started".into()));
+        }
         if dc.ready_state() == webrtc::data_channel::data_channel_state::RTCDataChannelState::Open {
             break;
         }
@@ -441,17 +470,13 @@ async fn send_single_file(
     );
     let meta_json = serde_json::to_string(&metadata)
         .map_err(|e| CoreError::P2P(format!("Failed to serialize metadata: {}", e)))?;
-    dc.send_text(meta_json)
-        .await
-        .map_err(|e| CoreError::P2P(e.to_string()))?;
+    send_with_timeout!(dc.send_text(meta_json));
 
     on_event(SenderEvent::FileStart {
         name: file.name.clone(),
         size: file.size,
     });
 
-    // Track bytes that have left the local DC buffer (≈ bytes on the wire) instead of bytes
-    // pushed in, so the bar doesn't run ahead of the receiver over a TURN relay.
     let total_bytes = file.size;
     let mut total_pushed: u64 = 0;
     let mut last_on_wire: u64 = 0;
@@ -465,8 +490,6 @@ async fn send_single_file(
         }
     };
 
-    // Event-driven backpressure: wake the send loop when the DC buffer drains below
-    // BUFFERED_AMOUNT_LOW instead of busy-polling.
     let drain_notify = Arc::new(Notify::new());
     dc.set_buffered_amount_low_threshold(BUFFERED_AMOUNT_LOW).await;
     let notify_clone = drain_notify.clone();
@@ -475,21 +498,41 @@ async fn send_single_file(
         Box::pin(async move { notify_clone.notify_one(); })
     })).await;
 
+    macro_rules! bail_if_remote_closed {
+        () => {{
+            if dc.ready_state() != RTCDataChannelState::Open || dc_signal.is_closed() {
+                return Err(CoreError::P2P("Receiver disconnected mid-transfer".into()));
+            }
+        }};
+    }
+
+    macro_rules! wait_for_drain_or_close {
+        () => {{
+            while dc.buffered_amount().await > BUFFERED_AMOUNT_HIGH {
+                bail_if_remote_closed!();
+                let buffered = dc.buffered_amount().await as u64;
+                report_on_wire(total_pushed, buffered, &mut last_on_wire);
+                tokio::select! {
+                    _ = drain_notify.notified() => {}
+                    _ = dc_signal.closed.notified() => {
+                        return Err(CoreError::P2P("Receiver disconnected mid-transfer".into()));
+                    }
+                    _ = tokio::time::sleep(std::time::Duration::from_millis(250)) => {}
+                }
+            }
+        }};
+    }
+
     match &file.source {
         PreparedFileSource::Memory(data) => {
             let mut offset = 0;
             while offset < data.len() {
-                while dc.buffered_amount().await > BUFFERED_AMOUNT_HIGH {
-                    let buffered = dc.buffered_amount().await as u64;
-                    report_on_wire(total_pushed, buffered, &mut last_on_wire);
-                    drain_notify.notified().await;
-                }
+                wait_for_drain_or_close!();
+                bail_if_remote_closed!();
 
                 let end = std::cmp::min(offset + DC_CHUNK_SIZE, data.len());
                 let chunk = &data[offset..end];
-                dc.send(&bytes::Bytes::copy_from_slice(chunk))
-                    .await
-                    .map_err(|e| CoreError::P2P(e.to_string()))?;
+                send_with_timeout!(dc.send(&bytes::Bytes::copy_from_slice(chunk)));
                 total_pushed += (end - offset) as u64;
                 offset = end;
 
@@ -510,15 +553,10 @@ async fn send_single_file(
                     break;
                 }
 
-                while dc.buffered_amount().await > BUFFERED_AMOUNT_HIGH {
-                    let buffered = dc.buffered_amount().await as u64;
-                    report_on_wire(total_pushed, buffered, &mut last_on_wire);
-                    drain_notify.notified().await;
-                }
+                wait_for_drain_or_close!();
+                bail_if_remote_closed!();
 
-                dc.send(&bytes::Bytes::copy_from_slice(&buf[..n]))
-                    .await
-                    .map_err(|e| CoreError::P2P(e.to_string()))?;
+                send_with_timeout!(dc.send(&bytes::Bytes::copy_from_slice(&buf[..n])));
                 total_pushed += n as u64;
 
                 let buffered = dc.buffered_amount().await as u64;
@@ -527,20 +565,14 @@ async fn send_single_file(
         }
     }
 
-    dc.send_text(EOF_SIGNAL.to_string())
-        .await
-        .map_err(|e| CoreError::P2P(e.to_string()))?;
+    send_with_timeout!(dc.send_text(EOF_SIGNAL.to_string()));
 
-    // Drain DC buffer so progress reaches 100% before FileEnd is emitted.
-    //
-    // `on_buffered_amount_low` only fires when the buffer *crosses down* through
-    // BUFFERED_AMOUNT_LOW. For small files that never went above the threshold the callback
-    // never fires, so a pure `notified().await` would hang. We mix it with a short polling
-    // tick to make progress every 100 ms regardless, and treat anything under 1 KiB as
-    // "drained enough" — the receiver typically already has the bytes by then.
     const DRAIN_FLOOR: u64 = 1024;
     let drain_start = std::time::Instant::now();
     loop {
+        if dc.ready_state() != RTCDataChannelState::Open || dc_signal.is_closed() {
+            return Err(CoreError::P2P("Receiver disconnected before transfer finished".into()));
+        }
         let buffered = dc.buffered_amount().await as u64;
         report_on_wire(total_pushed, buffered, &mut last_on_wire);
         if buffered <= DRAIN_FLOOR {
@@ -551,6 +583,9 @@ async fn send_single_file(
         }
         tokio::select! {
             _ = drain_notify.notified() => {}
+            _ = dc_signal.closed.notified() => {
+                return Err(CoreError::P2P("Receiver disconnected before transfer finished".into()));
+            }
             _ = tokio::time::sleep(std::time::Duration::from_millis(100)) => {}
         }
     }

@@ -92,10 +92,13 @@ pub async fn run(
                 println!("\x1b[32m✓ Transfer complete!\x1b[0m");
                 println!();
             }
-            SenderEvent::ReceiverDisconnected => {
-                println!("\n\x1b[33m⚠ Receiver disconnected. Waiting for new receiver...\x1b[0m");
+            SenderEvent::ReceiverCancelled => {
+                if let Some(pb) = pslot.lock().unwrap().take() {
+                    finish_progress(&pb);
+                }
+                println!("\n\x1b[31m✗ Receiver cancelled the download. Waiting for retry...\x1b[0m");
                 let mut slot = sslot.lock().unwrap();
-                *slot = Some(create_spinner("Waiting for receiver to connect..."));
+                *slot = Some(create_spinner("Waiting for receiver to retry..."));
             }
             SenderEvent::RelayDetected => {
                 println!("\x1b[33mℹ TURN server relay in use\x1b[0m");

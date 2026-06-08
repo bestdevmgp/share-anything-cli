@@ -31,7 +31,6 @@ pub fn render(
     let width = std::cmp::min(area.width, 60);
     let content_w = width.saturating_sub(4).max(1) as usize;
     let msg_lines = wrapped_line_count(message, content_w).max(1);
-    // 2 borders + 1 blank + msg_lines + 1 blank + 1 buttons.
     let needed: u16 = 5 + msg_lines as u16;
     let height = std::cmp::min(area.height, needed);
     let x = area.x + area.width.saturating_sub(width) / 2;
@@ -47,15 +46,12 @@ pub fn render(
     let inner = block.inner(box_area);
     f.render_widget(block, box_area);
 
-    // Anchor buttons to the bottom so a long wrapped message can't push them off-screen.
     let chunks = Layout::vertical([
         Constraint::Min(1),
         Constraint::Length(1),
     ])
     .split(inner);
 
-    // Split on '\n' so multi-line messages render as separate lines instead of being stuffed
-    // into one Line (where ratatui wraps but ignores the newline character).
     let mut body_lines: Vec<Line> = vec![Line::from("")];
     for piece in message.split('\n') {
         body_lines.push(Line::from(format!(" {}", piece)));
@@ -85,7 +81,6 @@ pub fn render(
     );
 }
 
-/// Byte-length wrap estimate — good enough for the ASCII messages this widget hosts.
 fn wrapped_line_count(text: &str, width: usize) -> usize {
     if width == 0 { return 1; }
     text.split('\n')

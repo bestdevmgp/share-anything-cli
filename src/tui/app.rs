@@ -36,7 +36,6 @@ pub enum ScreenAction {
     Stay,
     Quit,
     Pop,
-    /// Pop every screen down to (but not including) the dashboard at the bottom of the stack.
     PopToRoot,
     Push(Screen),
     #[allow(dead_code)]
@@ -51,7 +50,6 @@ pub struct App {
     pub cfg: CliConfig,
     pub client: ApiClient,
     pub stack: Vec<Screen>,
-    /// Per-screen task handles, kept in lockstep with `stack`. Popping a screen aborts its tasks.
     pub screen_tasks: Vec<Vec<AbortHandle>>,
     pub toast: Option<Toast>,
     pub tx: Option<Tx>,
@@ -83,8 +81,17 @@ impl App {
     pub fn drain_stdout(&mut self) -> Vec<String> { std::mem::take(&mut self.stdout_lines) }
 
     pub fn on_enter(&mut self) {
-        if self.client.is_authenticated() {
-            if let Some(tx) = self.tx.clone() {
+        if let Some(tx) = self.tx.clone() {
+            let tx_update = tx.clone();
+            let h_update = tokio::spawn(async move {
+                let _ = tx_update.send(Event::UpdateAvailable(
+                    crate::update_check::check_for_update().await,
+                ));
+            });
+            if let Some(tasks) = self.screen_tasks.last_mut() {
+                tasks.push(h_update.abort_handle());
+            }
+            if self.client.is_authenticated() {
                 if let Some(Screen::Dashboard(s)) = self.stack.last_mut() {
                     s.loading = true;
                     s.downloads_loading = true;
@@ -119,8 +126,6 @@ impl App {
             }
         }
 
-        // At the root, require a second Ctrl+C within ROOT_QUIT_DOUBLE_TAP to actually quit —
-        // a stray Ctrl+C shouldn't kill the session.
         if let Event::Key(k) = &ev {
             if k.code == KeyCode::Char('c') && k.modifiers.contains(KeyModifiers::CONTROL) {
                 if self.stack.len() <= 1 {
@@ -165,6 +170,11 @@ impl App {
                     }
                 }
             }
+            Event::UpdateAvailable(latest) => {
+                if let Some(Screen::Dashboard(s)) = self.stack.last_mut() {
+                    s.update_available = latest;
+                }
+            }
             Event::DownloadsLoaded(result) => {
                 if let Some(Screen::Dashboard(s)) = self.stack.last_mut() {
                     s.downloads_loading = false;
@@ -177,8 +187,6 @@ impl App {
                             }
                         }
                         Err(e) => {
-                            // No toast — UploadsLoaded already raises one for the shared
-                            // auth/network failure modes; stacking a second toast adds noise.
                             s.downloads_load_error = Some(e.to_string());
                         }
                     }
@@ -186,8 +194,9 @@ impl App {
             }
             Event::UploadProgress { delta } => {
                 if let Some(Screen::Upload(crate::tui::screens::upload::Screen::Options(s))) = self.stack.last_mut() {
-                    if let crate::tui::screens::upload::options::Phase::Running { sent, total, .. } = &mut s.phase {
+                    if let crate::tui::screens::upload::options::Phase::Running { sent, total, started_at, metrics, .. } = &mut s.phase {
                         *sent = sent.saturating_add(delta).min(*total);
+                        metrics.maybe_refresh(*sent, *total, *started_at);
                     }
                 }
             }
@@ -320,8 +329,6 @@ impl App {
                             mode: crate::tui::screens::download::ModeChoice::Each,
                         };
                     } else {
-                        // User Esc'd out of PasswordVerified before the timer fired —
-                        // restore whatever phase they're on now.
                         s.phase = replaced;
                     }
                 }
@@ -329,18 +336,22 @@ impl App {
             Event::DownloadProgress { delta } => {
                 if let Some(Screen::Download(s)) = self.stack.last_mut() {
                     match &mut s.phase {
-                        crate::tui::screens::download::Phase::Running { received, total, .. } => {
+                        crate::tui::screens::download::Phase::Running { received, total, started_at, metrics, .. } => {
                             *received = received.saturating_add(delta).min(*total);
+                            metrics.maybe_refresh(*received, *total, *started_at);
                         }
                         crate::tui::screens::download::Phase::RunningEach {
                             file_received,
                             file_total,
                             total_received,
                             total_total,
+                            started_at,
+                            metrics,
                             ..
                         } => {
                             *file_received = file_received.saturating_add(delta).min(*file_total);
                             *total_received = total_received.saturating_add(delta).min(*total_total);
+                            metrics.maybe_refresh(*total_received, *total_total, *started_at);
                         }
                         _ => {}
                     }
@@ -376,8 +387,6 @@ impl App {
                         ..
                     } = &mut s.phase
                     {
-                        // Snap per-file gauge to 100% before advancing so the file visibly
-                        // completes before we swap in the next file's metadata.
                         *file_received = *file_total;
                         saved_files.push(saved);
                         let next = idx + 1;
@@ -469,8 +478,6 @@ impl App {
                         self.abort_top_screen_tasks();
                         self.stack.pop();
                         if self.stack.is_empty() { self.quit = true; }
-                        // Refresh uploads so the dashboard reflects any rows the bulk delete
-                        // couldn't reach (rare — usually the list ends up empty).
                         self.refresh_dashboard_if_top();
                     }
                     Err(e) => {
@@ -562,7 +569,6 @@ impl App {
                             _ => {}
                         },
                         Err(_) => {
-                            // Network blip: silently keep polling.
                         }
                     }
                 }
@@ -572,7 +578,7 @@ impl App {
                 use crate::tui::screens::secure::options::{FileState, FileStatus};
                 if let Some(Screen::Secure(crate::tui::screens::secure::Screen::Options(s))) = self.stack.last_mut() {
                     if let crate::tui::screens::secure::options::Phase::Running {
-                        share_code, file_states, receiver_info, connected_info, active_idx, total, log, relay_in_use, ..
+                        share_code, file_states, receiver_info, connected_info, active_idx, total, log, relay_in_use, cancelled_notice, ..
                     } = &mut s.phase {
                         match ev {
                             E::Created { share_code: code, files: f } => {
@@ -584,6 +590,7 @@ impl App {
                                     sent: 0,
                                     status: FileStatus::Pending,
                                     started_at: None,
+                                    metrics: crate::format::ThrottledMetrics::default(),
                                 }).collect();
                                 log.push(format!("Share code: {}", code));
                                 log.push("Waiting for receiver\u{2026}".into());
@@ -594,6 +601,13 @@ impl App {
                             }
                             E::PeerMatched { device_info } => {
                                 *connected_info = device_info.clone();
+                                *cancelled_notice = false;
+                                for fs in file_states.iter_mut() {
+                                    fs.status = FileStatus::Pending;
+                                    fs.sent = 0;
+                                    fs.started_at = None;
+                                    fs.metrics = crate::format::ThrottledMetrics::default();
+                                }
                                 log.push(format!("Connected to {}", device_info.as_deref().unwrap_or("Unknown device")));
                             }
                             E::FileStart { name, size: _ } => {
@@ -610,6 +624,9 @@ impl App {
                                 if let Some(i) = *active_idx {
                                     if let Some(fs) = file_states.get_mut(i) {
                                         fs.sent = fs.sent.saturating_add(delta).min(fs.size);
+                                        if let Some(started) = fs.started_at {
+                                            fs.metrics.maybe_refresh(fs.sent, fs.size, started);
+                                        }
                                     }
                                 }
                             }
@@ -635,17 +652,19 @@ impl App {
                                     copied: false,
                                 };
                             }
-                            E::ReceiverDisconnected => {
-                                // Receiver offline === finished session: from the sender's
-                                // perspective "Done clicked" and "tab closed" are indistinguishable.
-                                log.push("Receiver disconnected.".into());
-                                let code = share_code.clone().unwrap_or_default();
-                                let log_taken = std::mem::take(log);
-                                s.phase = crate::tui::screens::secure::options::Phase::Done {
-                                    share_code: code,
-                                    log: log_taken,
-                                    copied: false,
-                                };
+                            E::ReceiverCancelled => {
+                                *cancelled_notice = true;
+                                *active_idx = None;
+                                *connected_info = None;
+                                for fs in file_states.iter_mut() {
+                                    if !matches!(fs.status, FileStatus::Done) {
+                                        fs.status = FileStatus::Pending;
+                                        fs.sent = 0;
+                                        fs.started_at = None;
+                                        fs.metrics = crate::format::ThrottledMetrics::default();
+                                    }
+                                }
+                                log.push("Receiver cancelled. Waiting for retry\u{2026}".into());
                             }
                             E::RelayDetected => {
                                 *relay_in_use = true;
@@ -691,6 +710,7 @@ impl App {
                                         received: 0,
                                         status: SecureFileStatus::Receiving,
                                         started_at: Some(std::time::Instant::now()),
+                                        metrics: crate::format::ThrottledMetrics::default(),
                                     });
                                     file_states.len() - 1
                                 };
@@ -701,6 +721,9 @@ impl App {
                                 if let Some(idx) = *active_idx {
                                     if let Some(st) = file_states.get_mut(idx) {
                                         st.received = st.received.saturating_add(delta);
+                                        if let Some(started) = st.started_at {
+                                            st.metrics.maybe_refresh(st.received, st.size, started);
+                                        }
                                     }
                                 }
                             }
@@ -945,7 +968,5 @@ pub struct AppCtx<'a> {
     pub tx: Option<&'a Tx>,
     pub toast: &'a mut Option<Toast>,
     pub stdout_lines: &'a mut Vec<String>,
-    /// Screens that call `tokio::spawn` push the resulting `abort_handle()` here so the work
-    /// gets cancelled when the screen pops.
     pub tasks: &'a mut Vec<AbortHandle>,
 }

@@ -16,25 +16,17 @@ pub type ReceiverEventFn = Arc<dyn Fn(ReceiverEvent) + Send + Sync>;
 
 #[derive(Debug, Clone)]
 pub enum ReceiverEvent {
-    /// Connected to sender via signaling, waiting for WebRTC handshake.
     Connecting,
-    /// WebRTC peer matched.
     PeerMatched { device_info: Option<String> },
-    /// New file metadata received; transfer about to begin.
     FileStart { name: String, size: u64 },
-    /// More bytes received for the current file.
     Progress { delta: u64 },
-    /// Current file fully received.
     FileEnd {
         #[allow(dead_code)]
         name: String,
         saved_to: PathBuf,
     },
-    /// All files done.
     TransferComplete,
-    /// Sender disconnected / cancelled.
     SenderGone(String),
-    /// Fatal transfer failure.
     Failed(String),
 }
 
@@ -42,18 +34,9 @@ pub struct ReceiverOptions {
     pub share_code: String,
     pub password: Option<String>,
     pub output_dir: PathBuf,
-    /// File names in download order. After the first file completes the receiver
-    /// asks the uploader for the next one over the same PC+DC using
-    /// `SignalingMessage::FileRequest` — no new WebSocket, no fresh ICE
-    /// handshake per file (which would otherwise cost 5–15s on a TURN relay).
     pub files: Vec<String>,
 }
 
-/// Run a full multi-file P2P download over **one** PeerConnection + DataChannel
-/// + WebSocket. Each subsequent file is requested via
-/// `SignalingMessage::FileRequest` on the same WS, and the uploader streams
-/// the file on the same DC. Dead time between files drops from "full ICE
-/// handshake" to "one signaling RTT".
 pub async fn run(
     client: &ApiClient,
     opts: ReceiverOptions,
@@ -109,11 +92,6 @@ pub async fn run(
         let current_data = current_data.clone();
 
         pc.on_data_channel(Box::new(move |dc: Arc<webrtc::data_channel::RTCDataChannel>| {
-            // Register on_message SYNCHRONOUSLY in this callback — doing it in
-            // a returned async block races SCTP, which can deliver messages
-            // before the handler is in place. This DC is reused for every
-            // file in the share via the FileRequest flow, so metadata /
-            // binary / EOF arrive on the same channel back-to-back.
             let meta_clone = current_meta.clone();
             let data_clone = current_data.clone();
             let file_tx_clone = file_tx.clone();
@@ -163,8 +141,6 @@ pub async fn run(
         }));
     }
 
-    // Initial join — requests `files[0]`. Password is re-verified server-side
-    // here; subsequent files inherit the already-authenticated session.
     sig.send(SignalingMessage::DownloaderJoin {
         share_code: share_code.clone(),
         peer_id: peer_id.clone(),
@@ -174,9 +150,6 @@ pub async fn run(
     })
     .map_err(|e| CoreError::P2P(e.to_string()))?;
 
-    // Inactivity guard: any signaling msg, ICE update, or chunk resets the
-    // deadline. Pure silence for STALL_TIMEOUT terminates with a clear error
-    // instead of hanging forever.
     const STALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
     let mut deadline = tokio::time::Instant::now() + STALL_TIMEOUT;
 
@@ -185,10 +158,6 @@ pub async fn run(
     let mut file_idx: usize = 0;
     let mut saved_files: Vec<PathBuf> = Vec::with_capacity(files.len());
 
-    // Saves the assembled file and either fires FileRequest for the next one or
-    // sends TransferComplete + breaks. A macro because both the file_rx arm and
-    // the late-file Disconnected-recovery arm need this and a closure would have
-    // to mutably borrow several outer locals across `.await` points.
     macro_rules! handle_received {
         ($f:expr) => {{
             let f = $f;
@@ -296,15 +265,22 @@ pub async fn run(
                     RTCIceConnectionState::Connected => {
                         let _ = rtc::check_relay(&pc).await;
                     }
-                    RTCIceConnectionState::Failed | RTCIceConnectionState::Disconnected => {
+                    RTCIceConnectionState::Failed
+                    | RTCIceConnectionState::Disconnected
+                    | RTCIceConnectionState::Closed => {
                         tokio::time::sleep(std::time::Duration::from_millis(300)).await;
                         if let Ok(f) = file_rx.try_recv() {
                             handle_received!(f);
-                        } else if matches!(state, RTCIceConnectionState::Failed) {
-                            break Err(CoreError::P2P("ICE connection failed".into()));
-                        } else if peer_offline {
-                            on_event(ReceiverEvent::SenderGone("Sender disconnected".into()));
-                            break Err(CoreError::P2P("Sender disconnected".into()));
+                        } else {
+                            let msg = if matches!(state, RTCIceConnectionState::Failed) {
+                                "Sender connection failed".to_string()
+                            } else if peer_offline {
+                                "Sender disconnected".to_string()
+                            } else {
+                                "Sender cancelled the transfer".to_string()
+                            };
+                            on_event(ReceiverEvent::SenderGone(msg.clone()));
+                            break Err(CoreError::P2P(msg));
                         }
                     }
                     _ => {}
@@ -315,11 +291,14 @@ pub async fn run(
                 on_event(ReceiverEvent::Progress { delta });
             }
             _ = tokio::time::sleep_until(deadline) => {
-                break Err(CoreError::P2P(format!(
-                    "Transfer for '{}' stalled (no signaling or data for {}s)",
-                    files.get(file_idx).cloned().unwrap_or_default(),
-                    STALL_TIMEOUT.as_secs()
-                )));
+                let stalled_file = files.get(file_idx).cloned().unwrap_or_default();
+                let msg = if stalled_file.is_empty() {
+                    "Connection lost. The sender may be offline.".to_string()
+                } else {
+                    format!("Connection lost while receiving '{}'.", stalled_file)
+                };
+                on_event(ReceiverEvent::SenderGone(msg.clone()));
+                break Err(CoreError::P2P(msg));
             }
             else => break Ok(()),
         }

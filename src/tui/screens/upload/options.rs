@@ -12,7 +12,6 @@ use ratatui::{
 use std::path::PathBuf;
 use tui_textarea::TextArea;
 
-/// Tuples of (label shown to user, value sent to API).
 pub const EXPIRES_OPTIONS: &[(&str, &str)] = &[
     ("5m", "5m"),
     ("30m", "30m"),
@@ -55,6 +54,7 @@ pub enum Phase {
         display: String,
         started_at: std::time::Instant,
         retry: UploadRetry,
+        metrics: crate::format::ThrottledMetrics,
     },
     Done { result: ShareResult, copied: bool },
     Failed { msg: String, retry: Option<UploadRetry> },
@@ -93,9 +93,6 @@ pub fn update(s: &mut State, ev: &Event, ctx: &mut AppCtx) -> ScreenAction {
             if matches!(k.code, KeyCode::Esc) {
                 return ScreenAction::Pop;
             }
-            // Global 'u' shortcut — same behavior as Enter on the Submit button. Suppressed
-            // while focus is on the Password field so the letter remains typeable there.
-            // Capital 'U' / Ctrl-U etc. fall through to existing handlers.
             if matches!(k.code, KeyCode::Char('u'))
                 && k.modifiers.is_empty()
                 && *focus != Field::Password
@@ -135,10 +132,6 @@ pub fn update(s: &mut State, ev: &Event, ctx: &mut AppCtx) -> ScreenAction {
                     if !ctx.client.is_authenticated() {
                         return ScreenAction::Stay;
                     }
-                    // Enter must NOT be forwarded to tui-textarea: it would insert a newline,
-                    // and `lines().join("")` would silently concatenate to a corrupted password
-                    // (e.g. typed "1234", scrolled off, retyped "1234", got "12341234"). Treat
-                    // Enter as "advance to next field" instead.
                     if matches!(k.code, KeyCode::Enter) {
                         *focus = next_field(*focus, ctx.client.is_authenticated());
                         return ScreenAction::Stay;
@@ -151,7 +144,6 @@ pub fn update(s: &mut State, ev: &Event, ctx: &mut AppCtx) -> ScreenAction {
                         return ScreenAction::Stay;
                     }
                     match k.code {
-                        // Left/Right cycle expiration options here — they don't go back.
                         KeyCode::Left | KeyCode::Char('h') => {
                             if *expires_idx > 0 { *expires_idx -= 1; }
                         }
@@ -193,16 +185,10 @@ pub fn update(s: &mut State, ev: &Event, ctx: &mut AppCtx) -> ScreenAction {
                         let one_time_val = ctx.client.is_authenticated() && *one_time;
                         start_upload(s, password_val, expiration, one_time_val, ctx)
                     } else if matches!(k.code, KeyCode::Char('b')) && k.modifiers.is_empty() {
-                        // Lowercase 'b' on the submit button drops back to the file picker, so
-                        // a stray Enter on the picker can be undone. Capital 'B' (Shift+b)
-                        // deliberately falls through to the password-forwarding branch below
-                        // so it can still be typed into a password.
                         ScreenAction::Pop
                     } else if matches!(k.code, KeyCode::Left) {
                         ScreenAction::Pop
                     } else if ctx.client.is_authenticated() && matches!(k.code, KeyCode::Char(_)) {
-                        // Typing on the Submit button jumps to Password and forwards the key,
-                        // so users can start typing without moving focus first.
                         *focus = Field::Password;
                         password.input(event::ev_to_input(k));
                         ScreenAction::Stay
@@ -243,8 +229,6 @@ pub fn update(s: &mut State, ev: &Event, ctx: &mut AppCtx) -> ScreenAction {
                         ctx.stdout_lines.push(format!("  Download   : share download {}", r.share_code));
                         ctx.stdout_lines.push(format!("  Expires    : {}", crate::time::utc_to_local(&r.expires_at)));
                     }
-                    // ← / b drops back to the picker so the same selection can be re-uploaded
-                    // with adjusted options. Other confirm keys go home.
                     if matches!(k.code, KeyCode::Left | KeyCode::Char('b')) {
                         ScreenAction::Pop
                     } else {
@@ -258,7 +242,6 @@ pub fn update(s: &mut State, ev: &Event, ctx: &mut AppCtx) -> ScreenAction {
             let Event::Key(k) = ev else { return ScreenAction::Stay; };
             match k.code {
                 KeyCode::Char('r') | KeyCode::Char('R') => {
-                    // start_upload mutates s.phase, so clone retry out of Failed first.
                     let retry = if let Phase::Failed { retry: Some(r), .. } = &s.phase {
                         Some(r.clone())
                     } else {
@@ -312,7 +295,6 @@ fn start_upload(
     let entries = match crate::core::upload::read_files(&paths) {
         Ok(e) => e,
         Err(e) => {
-            // Local file read failure is not a transient network issue — don't offer retry.
             s.phase = Phase::Failed { msg: e.to_string(), retry: None };
             return ScreenAction::Stay;
         }
@@ -330,6 +312,7 @@ fn start_upload(
         display: display.clone(),
         started_at: std::time::Instant::now(),
         retry: retry.clone(),
+        metrics: crate::format::ThrottledMetrics::default(),
     };
 
     let Some(tx) = ctx.tx.cloned() else {
@@ -362,8 +345,8 @@ pub fn render(s: &State, f: &mut Frame) {
         Phase::Form { password, expires_idx, one_time, focus, authenticated } => {
             render_form(f, area, &s.paths, password, *expires_idx, *one_time, *focus, *authenticated);
         }
-        Phase::Running { sent, total, display, started_at, .. } => {
-            render_running(f, area, *sent, *total, display, *started_at);
+        Phase::Running { sent, total, display, started_at, metrics, .. } => {
+            render_running(f, area, *sent, *total, display, *started_at, metrics);
         }
         Phase::Done { result, copied } => render_done(f, area, result, *copied),
         Phase::Failed { msg, retry } => render_failed(f, area, msg, retry.is_some()),
@@ -409,9 +392,6 @@ fn render_form(
     let inner = card(f, area, "Upload", Color::Cyan);
 
     let options_h: u16 = if authenticated { 11 } else { 2 };
-    // Reserve space for the options block + submit button + spacers + hints so a share with
-    // many files can't push them off-screen. The file list shrinks first; the renderer drops
-    // a final " ..." row to signal that some entries were hidden.
     let fixed_h: u16 = 1 + 1 + options_h + 1 + 3 + 1; // chunks 0,2,3,4,5,7
     let want_files_h = paths.len() as u16 + 1;
     let max_files_h = inner.height.saturating_sub(fixed_h);
@@ -471,9 +451,6 @@ fn render_files_section(f: &mut Frame, area: Rect, paths: &[PathBuf]) {
     let mut lines: Vec<Line> = Vec::with_capacity(cap);
     lines.push(section_header(format!("Files ({})", paths.len())));
 
-    // One row for the header, then one row per file. If we don't have enough rows for every
-    // file, sacrifice the last visible row to a "…" hint so the user knows some files were
-    // dropped from view (instead of silently truncating).
     let visible_rows = cap.saturating_sub(1);
     let total = paths.len();
     let need_overflow = total > visible_rows;
@@ -540,8 +517,6 @@ fn render_options_section(
 
     f.render_widget(Paragraph::new(section_header("Options")), rows[0]);
 
-    // Clone-and-reskin the TextArea so its border reflects focus without mutating the source
-    // (render takes `&TextArea`).
     let pw_focused = focus == Field::Password;
     let (border_color, title_style) = if pw_focused {
         (
@@ -568,8 +543,6 @@ fn render_options_section(
             Span::raw("   ")
         }
     };
-    // Pin-on-rail slider: ▼ head on line 1, ┃ body breaking the rail on line 2 at the
-    // same column.
     let active_style = Style::default()
         .fg(Color::Cyan)
         .add_modifier(Modifier::BOLD);
@@ -578,7 +551,6 @@ fn render_options_section(
     let stop_spacing: usize = 6;
     let bar_len = (EXPIRES_OPTIONS.len() - 1) * stop_spacing + 1;
     let pin_pos = expires_idx * stop_spacing;
-    // focus_marker (3) + "Expires   " (10) = 13 chars before the rail.
     let prefix_len: usize = 13;
     let head_line = Line::from(vec![
         Span::raw(" ".repeat(prefix_len + pin_pos)),
@@ -668,26 +640,27 @@ fn render_submit_button(f: &mut Frame, area: Rect, focused: bool) {
     );
 }
 
-fn fmt_progress(done: u64, total: u64, started_at: std::time::Instant) -> String {
-    let elapsed = started_at.elapsed().as_secs_f64().max(0.001);
-    let rate = (done as f64) / elapsed;
-    let pct = if total == 0 { 0.0 } else { (done as f64 / total as f64) * 100.0 };
-    let eta = if rate > 0.0 && total > done {
-        let secs = ((total - done) as f64 / rate).round() as u64;
-        format_duration(secs)
-    } else if total > 0 && done >= total {
-        "done".to_string()
+fn throttled_label(
+    done: u64,
+    total: u64,
+    metrics: &crate::format::ThrottledMetrics,
+) -> String {
+    let live_pct = if total == 0 { 0.0 } else { (done as f64 / total as f64) * 100.0 };
+    let (speed, eta) = if metrics.last_refresh_was_done() {
+        (
+            metrics.speed.clone(),
+            if total > 0 && done >= total {
+                "done".to_string()
+            } else {
+                metrics.eta.clone()
+            },
+        )
     } else {
-        "-".to_string()
-    };
-    let speed = if rate > 0.0 {
-        format!("{}/s", crate::format::format_size_u64(rate as u64))
-    } else {
-        "- /s".to_string()
+        ("- /s".to_string(), "-".to_string())
     };
     format!(
         "{:.0}% \u{2022} {} / {} \u{2022} {} \u{2022} ETA {}",
-        pct,
+        live_pct,
         crate::format::format_size_u64(done),
         crate::format::format_size_u64(total),
         speed,
@@ -695,17 +668,15 @@ fn fmt_progress(done: u64, total: u64, started_at: std::time::Instant) -> String
     )
 }
 
-fn format_duration(secs: u64) -> String {
-    if secs < 60 {
-        format!("{}s", secs)
-    } else if secs < 3600 {
-        format!("{}m {:02}s", secs / 60, secs % 60)
-    } else {
-        format!("{}h {:02}m", secs / 3600, (secs % 3600) / 60)
-    }
-}
-
-fn render_running(f: &mut Frame, area: Rect, sent: u64, total: u64, display: &str, started_at: std::time::Instant) {
+fn render_running(
+    f: &mut Frame,
+    area: Rect,
+    sent: u64,
+    total: u64,
+    display: &str,
+    _started_at: std::time::Instant,
+    metrics: &crate::format::ThrottledMetrics,
+) {
     let inner = card(f, area, "Uploading", Color::Cyan);
     let chunks = Layout::vertical([
         Constraint::Length(1),
@@ -726,7 +697,7 @@ fn render_running(f: &mut Frame, area: Rect, sent: u64, total: u64, display: &st
     );
 
     let ratio = if total == 0 { 0.0 } else { (sent as f64 / total as f64).min(1.0) };
-    let label = fmt_progress(sent, total, started_at);
+    let label = throttled_label(sent, total, metrics);
     let gauge = Gauge::default()
         .block(
             Block::default()

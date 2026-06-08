@@ -134,8 +134,6 @@ pub fn render(s: &State, f: &mut Frame) {
     }
 }
 
-/// Like `confirm::render` but without the yes/no buttons — for status displays where
-/// a choice would be misleading.
 fn render_status_box(
     f: &mut Frame,
     area: ratatui::layout::Rect,

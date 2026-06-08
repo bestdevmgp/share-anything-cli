@@ -82,7 +82,6 @@ pub async fn run(
 
     let output_dir = output.unwrap_or_else(|| PathBuf::from("."));
 
-    // Multi-file P2P needs an explicit file list so the receiver can request each one in turn.
     let info = crate::core::shares::get_share_info(client, &share_code).await?;
     let files: Vec<String> = info.files.iter().map(|f| f.file_name.clone()).collect();
 
