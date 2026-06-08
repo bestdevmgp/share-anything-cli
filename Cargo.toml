@@ -1,6 +1,6 @@
 [package]
 name = "share"
-version = "1.0.2"
+version = "1.0.3"
 edition = "2021"
 description = "CLI for Share Anything file sharing"
 license = "MIT"

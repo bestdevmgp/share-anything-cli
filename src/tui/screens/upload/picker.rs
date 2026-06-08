@@ -541,13 +541,29 @@ pub fn render(s: &State, f: &mut Frame) {
         s.selected.len(),
         crate::format::format_size_u64(total)
     );
-    let hints = match s.mode {
-        PickerMode::Upload => " [↑↓]move  [tab]switch  [space/enter]toggle  [enter]open  [r]range  [←/→]dir  [u]upload  [q/b]cancel ",
-        PickerMode::Secure => " [↑↓]move  [tab]switch  [space/enter]toggle  [enter]open  [r]range  [←/→]dir  [u]confirm  [q/b]cancel ",
+    let primary_action = match s.mode {
+        PickerMode::Upload => "upload",
+        PickerMode::Secure => "confirm",
     };
+    let secondary_hints = "[↑↓]move  [tab]switch  [space/enter]toggle  [enter]open  [r]range  [←/→]dir  [q/b]cancel ";
+    let white_bold = Style::default()
+        .fg(Color::White)
+        .add_modifier(Modifier::BOLD);
+    let cyan_bold = Style::default()
+        .fg(Color::Cyan)
+        .add_modifier(Modifier::BOLD);
+    let hint_line = Line::from(vec![
+        Span::raw(" "),
+        Span::styled("[", white_bold),
+        Span::styled("u", cyan_bold),
+        Span::styled("]", white_bold),
+        Span::styled(primary_action, white_bold),
+        Span::raw("   "),
+        Span::styled(secondary_hints, Style::default().fg(Color::DarkGray)),
+    ]);
     let body = Paragraph::new(vec![
         Line::from(Span::styled(summary, Style::default().add_modifier(Modifier::BOLD))),
-        Line::from(Span::styled(hints, Style::default().fg(Color::DarkGray))),
+        hint_line,
     ]);
     f.render_widget(body, outer[2]);
 }
