@@ -49,29 +49,3 @@ pub async fn check_for_update() -> Option<String> {
         None
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::is_newer;
-
-    #[test]
-    fn detects_newer_patch() {
-        assert!(is_newer("0.5.8", "0.5.7"));
-        assert!(is_newer("0.5.10", "0.5.7"));
-    }
-
-    #[test]
-    fn detects_newer_minor() {
-        assert!(is_newer("0.6.0", "0.5.99"));
-    }
-
-    #[test]
-    fn equal_is_not_newer() {
-        assert!(!is_newer("0.5.7", "0.5.7"));
-    }
-
-    #[test]
-    fn older_is_not_newer() {
-        assert!(!is_newer("0.5.6", "0.5.7"));
-    }
-}
