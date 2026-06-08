@@ -183,6 +183,26 @@ async fn run_cli(cli: Cli) -> Result<(), crate::error::CliError> {
     }
 }
 
+async fn run_cli_with_update_notice(cli: Cli) -> Result<(), crate::error::CliError> {
+    let update_task = tokio::spawn(update_check::check_for_update());
+    let result = run_cli(cli).await;
+    let update = tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        update_task,
+    )
+    .await
+    .ok()
+    .and_then(|j| j.ok())
+    .flatten();
+    if let Some(latest) = update {
+        eprintln!(
+            "\n\x1b[33m\u{26a0} A new version (v{}) is available. Run: npm update -g share-anything-cli\x1b[0m",
+            latest
+        );
+    }
+    result
+}
+
 #[tokio::main]
 async fn main() {
     let raw_args: Vec<String> = std::env::args().skip(1).collect();
@@ -201,7 +221,7 @@ async fn main() {
 
         if !stdin_tty {
             let cli = Cli::parse_from(["share", "upload"]);
-            if let Err(e) = run_cli(cli).await {
+            if let Err(e) = run_cli_with_update_notice(cli).await {
                 eprintln!("\x1b[31mError: {}\x1b[0m", e);
                 std::process::exit(1);
             }
@@ -214,7 +234,7 @@ async fn main() {
     }
 
     let cli = Cli::parse();
-    if let Err(e) = run_cli(cli).await {
+    if let Err(e) = run_cli_with_update_notice(cli).await {
         eprintln!("\x1b[31mError: {}\x1b[0m", e);
         std::process::exit(1);
     }
