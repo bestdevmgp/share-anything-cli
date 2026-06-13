@@ -915,12 +915,12 @@ fn render_password(
 fn render_verifying_password(f: &mut Frame, area: Rect, info: &FileInfo) {
     let inner = card(f, area, "Download", Color::Cyan);
     let chunks = Layout::vertical([
-        Constraint::Length(1),       // 0 spacer
-        Constraint::Length(1),       // 1 info bar
-        Constraint::Length(1),       // 2 spacer (matches render_password)
-        Constraint::Length(3),       // 3 verifying box (same height as the password input)
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(3),
         Constraint::Min(0),
-        Constraint::Length(1),       // hints
+        Constraint::Length(1),
     ])
     .split(inner);
     render_info_bar(f, chunks[1], info);

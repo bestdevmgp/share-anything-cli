@@ -124,13 +124,13 @@ struct MultipartInitResponse {
     upload_session_id: String,
     share_code: String,
     files: Vec<MultipartFileInit>,
-    #[allow(dead_code)] // wire-protocol field; client uses local CHUNK_SIZE constant
+    #[allow(dead_code)]
     chunk_size: i64,
 }
 
 #[derive(Debug, Deserialize, Clone)]
 struct MultipartFileInit {
-    #[allow(dead_code)] // server echoes file_name; client tracks names via FileEntry
+    #[allow(dead_code)]
     file_name: String,
     storage_key: String,
     upload_id: String,
@@ -369,7 +369,7 @@ async fn upload_file_parts(
             .map_err(|e| CoreError::Other(e.to_string()))?;
 
         tasks.spawn(async move {
-            let _permit = permit; // hold semaphore until task ends
+            let _permit = permit;
             let body = match source_clone {
                 FileSource::Path(path) => {
                     let mut f = tokio::fs::File::open(&path).await?;

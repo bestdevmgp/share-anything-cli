@@ -3,6 +3,8 @@ use crate::p2p::protocol::{SignalingMessage, WS_PING_INTERVAL_SECS};
 use futures_util::{SinkExt, StreamExt};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
+use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+use tokio_tungstenite::tungstenite::http::HeaderValue;
 use tokio_tungstenite::tungstenite::Message;
 
 pub struct SignalingClient {
@@ -14,14 +16,23 @@ pub struct SignalingClient {
 }
 
 impl SignalingClient {
-    pub async fn connect(api_base_url: &str) -> Result<Self> {
+    pub async fn connect(api_base_url: &str, personal_token: Option<&str>) -> Result<Self> {
         let ws_url = api_base_url
             .replace("https://", "wss://")
             .replace("http://", "ws://");
         let ws_url = format!("{}/ws/signaling", ws_url);
 
+        let mut request = ws_url
+            .into_client_request()
+            .map_err(|e| CliError::WebSocket(format!("Invalid signaling URL: {}", e)))?;
+        if let Some(token) = personal_token {
+            if let Ok(value) = HeaderValue::from_str(token) {
+                request.headers_mut().insert("X-Personal-Token", value);
+            }
+        }
+
         let (ws_stream, _) =
-            tokio_tungstenite::connect_async(&ws_url)
+            tokio_tungstenite::connect_async(request)
                 .await
                 .map_err(|e| CliError::WebSocket(format!("Failed to connect: {}", e)))?;
 

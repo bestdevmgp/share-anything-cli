@@ -204,18 +204,18 @@ fn render_loaded(f: &mut Frame, area: Rect, info: &FileInfo) {
 
     let body_lines_for_protected: u16 = if info.has_password { 5 } else { 0 };
     let files_count = info.files.len() as u16;
-    let fixed_h: u16 = 1 + 1 + 1 + body_lines_for_protected; // chunks 0,1,2,4
+    let fixed_h: u16 = 1 + 1 + 1 + body_lines_for_protected;
     let want_files_h = if info.has_password { 0 } else { 1 + files_count + 1 };
     let max_files_h = inner.height.saturating_sub(fixed_h);
     let files_h = want_files_h.min(max_files_h);
 
     let chunks = Layout::vertical([
-        Constraint::Length(1),                                    // top padding
-        Constraint::Length(1),                                    // info bar (chips)
-        Constraint::Length(1),                                    // spacer
-        Constraint::Length(files_h),                              // files section (if any)
-        Constraint::Length(body_lines_for_protected),             // password notice (if any)
-        Constraint::Min(0),                                       // remaining
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(files_h),
+        Constraint::Length(body_lines_for_protected),
+        Constraint::Min(0),
     ])
     .split(inner);
 

@@ -63,7 +63,7 @@ pub async fn run(
 
     on_event(ReceiverEvent::Connecting);
 
-    let mut sig = SignalingClient::connect(&client.base_url)
+    let mut sig = SignalingClient::connect(&client.base_url, client.token.as_deref())
         .await
         .map_err(|e| CoreError::P2P(e.to_string()))?;
 

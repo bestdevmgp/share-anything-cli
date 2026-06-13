@@ -22,7 +22,7 @@ pub const EXPIRES_OPTIONS: &[(&str, &str)] = &[
     ("24h", "24h"),
 ];
 
-const DEFAULT_EXPIRES_IDX: usize = 1; // "30m"
+const DEFAULT_EXPIRES_IDX: usize = 1;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Field {
@@ -392,7 +392,7 @@ fn render_form(
     let inner = card(f, area, "Upload", Color::Cyan);
 
     let options_h: u16 = if authenticated { 11 } else { 2 };
-    let fixed_h: u16 = 1 + 1 + options_h + 1 + 3 + 1; // chunks 0,2,3,4,5,7
+    let fixed_h: u16 = 1 + 1 + options_h + 1 + 3 + 1;
     let want_files_h = paths.len() as u16 + 1;
     let max_files_h = inner.height.saturating_sub(fixed_h);
     let files_h = want_files_h.min(max_files_h).max(2);
