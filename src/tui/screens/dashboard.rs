@@ -478,8 +478,7 @@ pub fn render(s: &State, f: &mut Frame, client: &ApiClient, toast: Option<&Toast
                     latest
                 ),
                 Style::default()
-                    .fg(Color::Yellow)
-                    .add_modifier(Modifier::BOLD),
+                    .fg(Color::Yellow),
             ))),
             chunks[2],
         );
