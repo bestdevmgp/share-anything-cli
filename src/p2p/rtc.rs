@@ -27,7 +27,7 @@ struct TurnCredentialsResponse {
 }
 
 pub async fn fetch_ice_servers(client: &ApiClient) -> Result<Vec<RTCIceServer>> {
-    let resp = client.client.get(client.url("/turn/credentials")).send().await;
+    let resp = client.client.get(client.url("/cli/turn/credentials")).send().await;
 
     match resp {
         Ok(r) if r.status().is_success() => {

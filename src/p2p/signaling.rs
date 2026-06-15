@@ -20,7 +20,7 @@ impl SignalingClient {
         let ws_url = api_base_url
             .replace("https://", "wss://")
             .replace("http://", "ws://");
-        let ws_url = format!("{}/ws/signaling", ws_url);
+        let ws_url = format!("{}/cli/ws/signaling", ws_url);
 
         let mut request = ws_url
             .into_client_request()

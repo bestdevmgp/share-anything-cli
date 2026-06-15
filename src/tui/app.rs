@@ -38,8 +38,6 @@ pub enum ScreenAction {
     Pop,
     PopToRoot,
     Push(Screen),
-    #[allow(dead_code)]
-    Replace(Screen),
     LogOut,
     PushLogin,
     PushDownloadForCode(String),
@@ -845,13 +843,6 @@ impl App {
             ScreenAction::Push(s) => {
                 self.stack.push(s);
                 self.screen_tasks.push(Vec::new());
-            }
-            ScreenAction::Replace(s) => {
-                self.abort_top_screen_tasks();
-                self.stack.pop();
-                self.stack.push(s);
-                self.screen_tasks.push(Vec::new());
-                self.refresh_dashboard_if_top();
             }
             ScreenAction::LogOut => {
                 self.abort_top_screen_tasks();

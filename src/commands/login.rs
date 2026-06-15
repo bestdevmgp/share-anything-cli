@@ -94,7 +94,7 @@ async fn run_device_login(config: &CliConfig) -> Result<()> {
 
         let status = match poll_device_status(config, &session.session_id).await {
             Ok(s) => s,
-            Err(_) => continue, // Network or server error, retry
+            Err(_) => continue,
         };
 
         match status.status.as_str() {

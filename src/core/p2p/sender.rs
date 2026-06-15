@@ -66,10 +66,6 @@ struct P2PCreateRequest {
 #[derive(Debug, Deserialize)]
 struct P2PCreateResponse {
     share_code: String,
-    #[allow(dead_code)]
-    files: Vec<String>,
-    #[allow(dead_code)]
-    expires_at: String,
 }
 
 pub enum PreparedFileSource {
@@ -423,7 +419,7 @@ pub async fn run(
         }
     }
 
-    } // 'session loop
+    }
 }
 
 async fn send_single_file(

@@ -2,7 +2,7 @@ use ratatui::style::{Color, Style};
 use std::time::Instant;
 
 #[derive(Debug, Clone, Copy)]
-pub enum ToastKind { #[allow(dead_code)] Info, #[allow(dead_code)] Success, Warn, Error }
+pub enum ToastKind { Info, Success, Warn, Error }
 
 #[derive(Debug)]
 pub struct Toast {
@@ -13,7 +13,6 @@ pub struct Toast {
 }
 
 impl Toast {
-    #[allow(dead_code)]
     pub fn info(msg: impl Into<String>) -> Self { Self::new(msg, ToastKind::Info) }
     pub fn success(msg: impl Into<String>) -> Self { Self::new(msg, ToastKind::Success) }
     pub fn warn(msg: impl Into<String>) -> Self { Self::new(msg, ToastKind::Warn) }

@@ -124,14 +124,10 @@ struct MultipartInitResponse {
     upload_session_id: String,
     share_code: String,
     files: Vec<MultipartFileInit>,
-    #[allow(dead_code)]
-    chunk_size: i64,
 }
 
 #[derive(Debug, Deserialize, Clone)]
 struct MultipartFileInit {
-    #[allow(dead_code)]
-    file_name: String,
     storage_key: String,
     upload_id: String,
     total_parts: i32,

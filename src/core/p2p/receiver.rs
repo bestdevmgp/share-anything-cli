@@ -21,7 +21,6 @@ pub enum ReceiverEvent {
     FileStart { name: String, size: u64 },
     Progress { delta: u64 },
     FileEnd {
-        #[allow(dead_code)]
         name: String,
         saved_to: PathBuf,
     },

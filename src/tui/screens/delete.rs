@@ -151,7 +151,7 @@ fn render_status_box(
     let lines: Vec<Line> = std::iter::once(Line::from(""))
         .chain(message.split('\n').map(|p| Line::from(format!(" {}", p))))
         .collect();
-    let needed: u16 = (lines.len() as u16 + 2).min(area.height); // borders top/bottom
+    let needed: u16 = (lines.len() as u16 + 2).min(area.height);
     let x = area.x + area.width.saturating_sub(width) / 2;
     let y = area.y + area.height.saturating_sub(needed) / 2;
     let box_area = Rect { x, y, width, height: needed };
