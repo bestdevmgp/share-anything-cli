@@ -54,6 +54,10 @@ struct P2PFileInfo {
     size: i64,
     #[serde(rename = "type")]
     content_type: String,
+    /// Root-relative path (including the leaf name) for folder transfers.
+    /// Omitted for files shared at the root so the backend stores no path.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    relative_path: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -77,7 +81,30 @@ struct PreparedFile {
     name: String,
     size: u64,
     content_type: String,
+    relative_path: Option<String>,
     source: PreparedFileSource,
+}
+
+impl PreparedFile {
+    /// The key receivers use to request this file: the relative path when set,
+    /// otherwise the base name. Mirrors the web client's
+    /// `fileKey = relative_path || file_name`.
+    fn key(&self) -> &str {
+        match &self.relative_path {
+            Some(p) if !p.is_empty() => p.as_str(),
+            _ => &self.name,
+        }
+    }
+}
+
+/// Resolve a requested file key back to a prepared file. A receiver may request
+/// by relative path (web, folder transfers) or by base name (CLI receiver,
+/// which is not served `relative_path`), so try both.
+fn find_prepared<'a>(prepared: &'a [PreparedFile], requested: &str) -> Option<&'a PreparedFile> {
+    prepared
+        .iter()
+        .find(|f| f.key() == requested)
+        .or_else(|| prepared.iter().find(|f| f.name == requested))
 }
 
 pub async fn run(
@@ -96,6 +123,7 @@ pub async fn run(
             name: f.name.clone(),
             size: f.size as i64,
             content_type: f.content_type.clone(),
+            relative_path: f.relative_path.clone(),
         })
         .collect();
 
@@ -267,10 +295,9 @@ pub async fn run(
                             on_event(SenderEvent::RelayDetected);
                         }
                         let file_to_send: &PreparedFile = match &first_file_name {
-                            Some(name) => prepared
-                                .iter()
-                                .find(|f| &f.name == name)
-                                .unwrap_or(&prepared[0]),
+                            Some(name) => {
+                                find_prepared(&prepared, name).unwrap_or(&prepared[0])
+                            }
                             None => &prepared[0],
                         };
                         if send_single_file(&dc, file_to_send, &on_event, &dc_signal).await.is_err() {
@@ -325,10 +352,7 @@ pub async fn run(
             Some(msg) = sig.recv() => {
                 match msg {
                     SignalingMessage::FileRequest { file_name, .. } => {
-                        let file = prepared
-                            .iter()
-                            .find(|f| f.name == file_name)
-                            .unwrap_or(&prepared[0]);
+                        let file = find_prepared(&prepared, &file_name).unwrap_or(&prepared[0]);
                         on_event(SenderEvent::FileStart {
                             name: file.name.clone(),
                             size: file.size,
@@ -608,23 +632,25 @@ fn prepare_files(
             name: file_name,
             size,
             content_type: "application/octet-stream".to_string(),
+            relative_path: None,
             source: PreparedFileSource::Memory(data),
         });
     } else {
-        for path in files {
-            if !path.exists() {
-                return Err(CoreError::Other(format!("File not found: {}", path.display())));
-            }
-            let file_name = path.file_name().unwrap_or_default().to_string_lossy().to_string();
-            let size = std::fs::metadata(&path)
-                .map_err(|e| CoreError::Other(format!("Failed to stat file {}: {}", path.display(), e)))?
+        // Recurse into directory arguments, computing each file's root-relative
+        // path so the folder structure is preserved on the backend.
+        let collected = crate::core::files::collect_files(&files)?;
+        for c in collected {
+            let file_name = c.path.file_name().unwrap_or_default().to_string_lossy().to_string();
+            let size = std::fs::metadata(&c.path)
+                .map_err(|e| CoreError::Other(format!("Failed to stat file {}: {}", c.path.display(), e)))?
                 .len();
-            let content_type = mime_guess::from_path(&path).first_or_octet_stream().to_string();
+            let content_type = mime_guess::from_path(&c.path).first_or_octet_stream().to_string();
             prepared.push(PreparedFile {
                 name: file_name,
                 size,
                 content_type,
-                source: PreparedFileSource::Path(path),
+                relative_path: c.relative_path,
+                source: PreparedFileSource::Path(c.path),
             });
         }
     }
@@ -639,4 +665,72 @@ fn uuid_simple() -> String {
         .unwrap_or_default()
         .as_nanos();
     format!("cli-{:x}", t)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn prepared(name: &str, relative_path: Option<&str>) -> PreparedFile {
+        PreparedFile {
+            name: name.to_string(),
+            size: 1,
+            content_type: "application/octet-stream".to_string(),
+            relative_path: relative_path.map(|s| s.to_string()),
+            source: PreparedFileSource::Memory(Vec::new()),
+        }
+    }
+
+    #[test]
+    fn p2p_file_info_omits_relative_path_when_none() {
+        let info = P2PFileInfo {
+            name: "a.txt".to_string(),
+            size: 3,
+            content_type: "text/plain".to_string(),
+            relative_path: None,
+        };
+        let v: serde_json::Value = serde_json::to_value(&info).unwrap();
+        assert!(v.get("relative_path").is_none());
+        assert_eq!(v["name"], "a.txt");
+        assert_eq!(v["type"], "text/plain");
+    }
+
+    #[test]
+    fn p2p_file_info_includes_relative_path_when_set() {
+        let info = P2PFileInfo {
+            name: "report.pdf".to_string(),
+            size: 3,
+            content_type: "application/pdf".to_string(),
+            relative_path: Some("docs/2024/report.pdf".to_string()),
+        };
+        let v: serde_json::Value = serde_json::to_value(&info).unwrap();
+        assert_eq!(v["relative_path"], "docs/2024/report.pdf");
+    }
+
+    #[test]
+    fn key_prefers_relative_path() {
+        assert_eq!(prepared("a.txt", Some("docs/a.txt")).key(), "docs/a.txt");
+        assert_eq!(prepared("a.txt", None).key(), "a.txt");
+        // Empty relative path falls back to the base name.
+        assert_eq!(prepared("a.txt", Some("")).key(), "a.txt");
+    }
+
+    #[test]
+    fn find_prepared_matches_relative_path_then_name() {
+        let files = vec![
+            prepared("report.pdf", Some("docs/2024/report.pdf")),
+            prepared("report.pdf", Some("docs/2023/report.pdf")),
+            prepared("flat.txt", None),
+        ];
+
+        // Web/folder receiver requests by relative path.
+        assert_eq!(
+            find_prepared(&files, "docs/2023/report.pdf").unwrap().key(),
+            "docs/2023/report.pdf"
+        );
+        // CLI receiver requests by base name (no relative path served).
+        assert_eq!(find_prepared(&files, "flat.txt").unwrap().name, "flat.txt");
+        // Unknown key does not match.
+        assert!(find_prepared(&files, "nope.txt").is_none());
+    }
 }

@@ -1,4 +1,5 @@
 pub mod error;
+pub mod files;
 pub mod p2p;
 pub mod upload;
 pub mod download;
