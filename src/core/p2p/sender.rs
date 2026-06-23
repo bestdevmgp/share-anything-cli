@@ -65,6 +65,8 @@ struct P2PCreateRequest {
     files: Vec<P2PFileInfo>,
     #[serde(skip_serializing_if = "Option::is_none")]
     password: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    empty_folders: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -112,7 +114,7 @@ pub async fn run(
     opts: SenderOptions,
     on_event: SenderEventFn,
 ) -> Result<(), CoreError> {
-    let prepared = prepare_files(opts.files, opts.stdin_data, opts.stdin_name)?;
+    let (prepared, empty_folders) = prepare_files(opts.files, opts.stdin_data, opts.stdin_name)?;
     if prepared.is_empty() {
         return Err(CoreError::Other("No files to send".into()));
     }
@@ -133,6 +135,7 @@ pub async fn run(
         .json(&P2PCreateRequest {
             files: file_infos,
             password: opts.password.clone(),
+            empty_folders,
         })
         .send()
         .await?;
@@ -622,8 +625,9 @@ fn prepare_files(
     files: Vec<PathBuf>,
     stdin_data: Option<Vec<u8>>,
     name: Option<String>,
-) -> Result<Vec<PreparedFile>, CoreError> {
+) -> Result<(Vec<PreparedFile>, Vec<String>), CoreError> {
     let mut prepared = Vec::new();
+    let mut empty_folders = Vec::new();
 
     if let Some(data) = stdin_data {
         let file_name = name.unwrap_or_else(|| "stdin.txt".to_string());
@@ -639,7 +643,8 @@ fn prepare_files(
         // Recurse into directory arguments, computing each file's root-relative
         // path so the folder structure is preserved on the backend.
         let collected = crate::core::files::collect_files(&files)?;
-        for c in collected {
+        empty_folders = collected.empty_folders;
+        for c in collected.files {
             let file_name = c.path.file_name().unwrap_or_default().to_string_lossy().to_string();
             let size = std::fs::metadata(&c.path)
                 .map_err(|e| CoreError::Other(format!("Failed to stat file {}: {}", c.path.display(), e)))?
@@ -655,7 +660,7 @@ fn prepare_files(
         }
     }
 
-    Ok(prepared)
+    Ok((prepared, empty_folders))
 }
 
 fn uuid_simple() -> String {
@@ -705,6 +710,28 @@ mod tests {
         };
         let v: serde_json::Value = serde_json::to_value(&info).unwrap();
         assert_eq!(v["relative_path"], "docs/2024/report.pdf");
+    }
+
+    #[test]
+    fn p2p_create_request_omits_empty_folders_when_empty() {
+        let req = P2PCreateRequest {
+            files: vec![],
+            password: None,
+            empty_folders: vec![],
+        };
+        let v: serde_json::Value = serde_json::to_value(&req).unwrap();
+        assert!(v.get("empty_folders").is_none());
+    }
+
+    #[test]
+    fn p2p_create_request_includes_empty_folders_when_set() {
+        let req = P2PCreateRequest {
+            files: vec![],
+            password: None,
+            empty_folders: vec!["project/logs".to_string()],
+        };
+        let v: serde_json::Value = serde_json::to_value(&req).unwrap();
+        assert_eq!(v["empty_folders"], serde_json::json!(["project/logs"]));
     }
 
     #[test]

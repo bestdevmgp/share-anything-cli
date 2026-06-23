@@ -21,12 +21,18 @@ pub struct CollectedFile {
     pub relative_path: Option<String>,
 }
 
+pub struct Collected {
+    pub files: Vec<CollectedFile>,
+    pub empty_folders: Vec<String>,
+}
+
 /// Walk the given input paths. Plain files are collected as-is with no relative
 /// path. Directories are recursed; every contained file gets a relative path
 /// rooted at the directory argument's own name, so the top-level folder is
 /// preserved (e.g. arg `./docs` → `docs/2024/report.pdf`).
-pub fn collect_files(inputs: &[PathBuf]) -> Result<Vec<CollectedFile>, CoreError> {
-    let mut out = Vec::new();
+pub fn collect_files(inputs: &[PathBuf]) -> Result<Collected, CoreError> {
+    let mut files = Vec::new();
+    let mut empty_folders = Vec::new();
     for input in inputs {
         if !input.exists() {
             return Err(CoreError::Other(format!(
@@ -42,18 +48,23 @@ pub fn collect_files(inputs: &[PathBuf]) -> Result<Vec<CollectedFile>, CoreError
                 .file_name()
                 .map(|n| n.to_string_lossy().to_string())
                 .unwrap_or_default();
-            collect_dir(input, &prefix, &mut out)?;
+            collect_dir(input, &prefix, &mut files, &mut empty_folders)?;
         } else {
-            out.push(CollectedFile {
+            files.push(CollectedFile {
                 path: input.clone(),
                 relative_path: None,
             });
         }
     }
-    Ok(out)
+    Ok(Collected { files, empty_folders })
 }
 
-fn collect_dir(dir: &Path, prefix: &str, out: &mut Vec<CollectedFile>) -> Result<(), CoreError> {
+fn collect_dir(
+    dir: &Path,
+    prefix: &str,
+    files: &mut Vec<CollectedFile>,
+    empty_folders: &mut Vec<String>,
+) -> Result<bool, CoreError> {
     let mut entries: Vec<PathBuf> = std::fs::read_dir(dir)
         .map_err(|e| CoreError::Other(format!("Failed to read directory {}: {}", dir.display(), e)))?
         .filter_map(|e| e.ok())
@@ -63,6 +74,7 @@ fn collect_dir(dir: &Path, prefix: &str, out: &mut Vec<CollectedFile>) -> Result
     // order) stable across runs.
     entries.sort();
 
+    let mut any_file = false;
     for path in entries {
         let name = path
             .file_name()
@@ -77,15 +89,25 @@ fn collect_dir(dir: &Path, prefix: &str, out: &mut Vec<CollectedFile>) -> Result
         // `is_dir` / `is_file` follow symlinks; anything that is neither (e.g. a
         // broken symlink) is skipped.
         if path.is_dir() {
-            collect_dir(&path, &rel, out)?;
+            if collect_dir(&path, &rel, files, empty_folders)? {
+                any_file = true;
+            }
         } else if path.is_file() {
-            out.push(CollectedFile {
+            files.push(CollectedFile {
                 path,
                 relative_path: normalize_relative_path(&rel),
             });
+            any_file = true;
         }
     }
-    Ok(())
+
+    if !any_file {
+        if let Some(p) = normalize_relative_path(prefix) {
+            empty_folders.push(p);
+        }
+    }
+
+    Ok(any_file)
 }
 
 /// Normalize a relative path to match the backend's `sanitize_relative_path`.
@@ -183,9 +205,10 @@ mod tests {
         std::fs::write(&file, b"hi").unwrap();
 
         let collected = collect_files(&[file.clone()]).unwrap();
-        assert_eq!(collected.len(), 1);
-        assert_eq!(collected[0].relative_path, None);
-        assert_eq!(collected[0].path, file);
+        assert_eq!(collected.files.len(), 1);
+        assert_eq!(collected.files[0].relative_path, None);
+        assert_eq!(collected.files[0].path, file);
+        assert!(collected.empty_folders.is_empty());
 
         std::fs::remove_dir_all(&root).ok();
     }
@@ -202,6 +225,7 @@ mod tests {
 
         let collected = collect_files(&[proj.clone()]).unwrap();
         let mut rels: Vec<String> = collected
+            .files
             .iter()
             .map(|c| c.relative_path.clone().unwrap())
             .collect();
@@ -213,6 +237,38 @@ mod tests {
                 "project/README.md".to_string(),
                 "project/docs/2024/report.pdf".to_string(),
                 "project/src/main.rs".to_string(),
+            ]
+        );
+        assert!(collected.empty_folders.is_empty());
+
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn collect_records_empty_folders_at_every_level() {
+        let base = unique_tmp("empty");
+        let proj = base.join("project");
+        std::fs::create_dir_all(proj.join("logs")).unwrap();
+        std::fs::create_dir_all(proj.join("data/cache")).unwrap();
+        std::fs::write(proj.join("README.md"), b"r").unwrap();
+
+        let collected = collect_files(&[proj.clone()]).unwrap();
+
+        let rels: Vec<String> = collected
+            .files
+            .iter()
+            .map(|c| c.relative_path.clone().unwrap())
+            .collect();
+        assert_eq!(rels, vec!["project/README.md".to_string()]);
+
+        let mut empties = collected.empty_folders.clone();
+        empties.sort();
+        assert_eq!(
+            empties,
+            vec![
+                "project/data".to_string(),
+                "project/data/cache".to_string(),
+                "project/logs".to_string(),
             ]
         );
 

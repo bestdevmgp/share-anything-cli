@@ -51,7 +51,7 @@ pub fn read_files(paths: &[PathBuf]) -> Result<Vec<FileEntry>, CoreError> {
     // accept a relative path, so the collected structure is flattened here (each
     // file keeps only its base name); folder structure is preserved on the P2P
     // path, which has backend support for `relative_path`.
-    let collected = crate::core::files::collect_files(paths)?;
+    let collected = crate::core::files::collect_files(paths)?.files;
     let mut out = Vec::with_capacity(collected.len());
     for c in collected {
         let name = c.path.file_name().unwrap_or_default().to_string_lossy().to_string();
