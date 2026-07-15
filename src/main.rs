@@ -19,7 +19,7 @@ use std::path::PathBuf;
     version,
     about = "Share Anything CLI - Fast file sharing from the terminal",
     override_usage = "share <COMMAND>",
-    before_help = "\x1b[1mShare Anything CLI\x1b[0m - Fast file sharing from the terminal\n  \x1b[2mhttps://share.mingyu.dev\x1b[0m",
+    before_help = "\x1b[1mShare Anything CLI\x1b[0m - Fast file sharing from the terminal\n  \x1b[2mhttps://shareany.app\x1b[0m",
     after_help = "\x1b[1mExamples:\x1b[0m
   share upload file.txt              Upload a file
   share upload a.txt b.txt           Upload multiple files
